@@ -1,0 +1,241 @@
+@import "tailwindcss";
+
+/* ============================================================
+   House of Flavours — premium dark theme tokens
+   ============================================================ */
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Playfair Display", ui-serif, Georgia, "Times New Roman", serif;
+
+  --color-night-950: #08070a;
+  --color-night-900: #0e0d12;
+  --color-night-850: #14121a;
+  --color-night-800: #1b1822;
+  --color-night-700: #26222f;
+  --color-night-600: #332e3f;
+
+  --color-gold-200: #f5e8c0;
+  --color-gold-300: #ecd28d;
+  --color-gold-400: #dfbb5f;
+  --color-gold-500: #d4af37;
+  --color-gold-600: #b9922a;
+  --color-gold-700: #8f6f1d;
+
+  --color-burgundy-400: #b23a54;
+  --color-burgundy-500: #9c2f47;
+  --color-burgundy-600: #7b2233;
+  --color-burgundy-700: #5c1926;
+  --color-burgundy-800: #3f101a;
+
+  --color-cream-100: #f8f2e7;
+  --color-cream-200: #efe4d2;
+  --color-cream-300: #e2d3ba;
+  --color-cream-400: #c9b696;
+  --color-cream-500: #a89374;
+
+  --animate-float-slow: floatY 8s ease-in-out infinite;
+  --animate-float: floatY 6s ease-in-out infinite;
+  --animate-float-fast: floatY 4.5s ease-in-out infinite;
+  --animate-spin-slow: spinSlow 26s linear infinite;
+  --animate-shimmer: shimmer 6s linear infinite;
+  --animate-glow: glowPulse 5s ease-in-out infinite;
+}
+
+@keyframes spinSlow {
+  to { transform: rotate(360deg); }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-night-950);
+    color: var(--color-cream-100);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-gold-500) 30%, transparent);
+  }
+}
+
+/* ============================================================
+   Keyframes
+   ============================================================ */
+@keyframes floatY {
+  0%, 100% { transform: translateY(0) rotate(var(--rot, 0deg)); }
+  50% { transform: translateY(-18px) rotate(var(--rot, 0deg)); }
+}
+
+@keyframes shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(28px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ============================================================
+   Scroll reveal
+   ============================================================ */
+.reveal {
+  opacity: 0;
+  transform: translateY(34px);
+  transition: opacity 0.8s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* ============================================================
+   3D helpers
+   ============================================================ */
+.perspective {
+  perspective: 1400px;
+}
+.perspective-near {
+  perspective: 900px;
+}
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+.backface-hidden {
+  backface-visibility: hidden;
+}
+
+/* Mouse-parallax layer: --mx / --my are unitless (-1..1), --depth sets strength */
+.hero-layer {
+  transform: translate3d(
+    calc(var(--mx, 0) * var(--depth, 1) * 1px),
+    calc(var(--my, 0) * var(--depth, 1) * 1px),
+    0
+  );
+  transition: transform 0.18s ease-out;
+}
+
+.tilt-card {
+  transform-style: preserve-3d;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.4s ease;
+}
+.tilt-card:hover {
+  transform: translateY(-10px) rotateX(5deg) rotateY(-6deg);
+  box-shadow: 0 30px 60px -30px rgba(212, 175, 55, 0.5);
+}
+
+/* ============================================================
+   Signature surfaces & text
+   ============================================================ */
+.glass {
+  background: color-mix(in srgb, var(--color-night-850) 78%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid color-mix(in srgb, var(--color-gold-500) 16%, transparent);
+}
+
+.text-gradient-gold {
+  background-image: linear-gradient(
+    100deg,
+    var(--color-gold-300) 0%,
+    var(--color-gold-500) 40%,
+    var(--color-gold-200) 60%,
+    var(--color-gold-400) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glow-gold {
+  box-shadow: 0 0 70px -18px color-mix(in srgb, var(--color-gold-500) 60%, transparent);
+}
+
+.gold-hairline {
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-gold-500) 70%, transparent),
+    transparent
+  );
+}
+
+.grid-lines {
+  background-image: linear-gradient(
+      to right,
+      color-mix(in srgb, var(--color-gold-500) 6%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-gold-500) 6%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 64px 64px;
+}
+
+/* ============================================================
+   Utilities preserved from the original app
+   ============================================================ */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ============================================================
+   Accessibility
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .hero-layer,
+  .tilt-card {
+    transform: none !important;
+    transition: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-invoice,
+  #printable-invoice * {
+    visibility: visible;
+  }
+  #printable-invoice {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+}

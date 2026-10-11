@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#14121a"/>
+  <g transform="translate(200 140)">
+    <circle r="108" fill="#1b1822" stroke="#d4af37" stroke-opacity="0.25" stroke-width="2"/>
+    <circle r="86" fill="#26222f"/>
+    <circle r="68" fill="#1b1822" stroke="#d4af37" stroke-opacity="0.12"/>
+    <path d="M-28 -40 L-28 42" stroke="#d4af37" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round"/>
+    <path d="M-28 -26 L-56 -58 M-28 26 L-56 58" stroke="#d4af37" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round"/>
+    <path d="M28 -12 A10 10 0 0 1 28 12" fill="none" stroke="#d4af37" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round"/>
+    <path d="M28 12 L28 42" stroke="#d4af37" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round"/>
+  </g>
+  <text x="200" y="266" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#c9b696">House of Flavours</text>
+</svg>
