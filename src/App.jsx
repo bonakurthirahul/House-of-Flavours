@@ -578,7 +578,10 @@ function App() {
             onUpdate={updateQuantity}
             onOrderNow={() => { setActiveTab('cart'); window.scrollTo({ top: 0 }); }}
           />
-          <Reviews />
+          <Reviews
+            currentUser={currentUser}
+            onLogin={() => { setShowAuthModal(true); setAuthErrorMsg(''); }}
+          />
           <Contact />
         </>
       )}

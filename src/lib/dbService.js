@@ -239,6 +239,61 @@ export async function deleteContactMessage(id) {
 }
 
 // ------------------------------------------------------------------
+// Customer reviews (migration 007). Public reads return APPROVED reviews only
+// (RLS also enforces this server-side). Submitting goes exclusively through
+// the validated submit_review() RPC, which enforces authentication, ownership,
+// a Delivered order, rating/comment bounds and one review per order.
+// ------------------------------------------------------------------
+const REVIEW_PUBLIC_STATUS = 'approved';
+
+export async function loadApprovedReviews({ limit = 200 } = {}) {
+  const { data, error } = await supabase
+    .from('reviews')
+    .select('id, rating, title, comment, reviewer_label, created_at')
+    .eq('moderation_status', REVIEW_PUBLIC_STATUS)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(friendlyError(error));
+  return data || [];
+}
+
+// Order ids the current customer has already reviewed (RLS limits this to
+// their own rows), used to hide already-reviewed orders from the form.
+export async function loadReviewedOrderIds(userId) {
+  if (!userId) return [];
+  const { data, error } = await supabase
+    .from('reviews')
+    .select('order_id')
+    .eq('user_id', userId);
+  if (error) throw new Error(friendlyError(error));
+  return (data || []).map((r) => r.order_id).filter(Boolean);
+}
+
+// The customer's completed (Delivered) orders — the only ones they may review.
+export async function loadReviewableOrders(userId) {
+  if (!userId) return [];
+  const { data, error } = await supabase
+    .from('orders')
+    .select('order_id, items_summary, created_at')
+    .eq('user_id', userId)
+    .eq('status', 'Delivered')
+    .order('created_at', { ascending: false });
+  if (error) throw new Error(friendlyError(error));
+  return data || [];
+}
+
+export async function submitReview({ orderId, rating, title, comment }) {
+  const { data, error } = await supabase.rpc('submit_review', {
+    p_order_id: orderId,
+    p_rating: Number(rating),
+    p_title: title || '',
+    p_comment: comment
+  });
+  if (error) throw new Error(friendlyError(error));
+  return data;
+}
+
+// ------------------------------------------------------------------
 // Settings (staff read via RLS; public keys via get_public_settings()).
 // ------------------------------------------------------------------
 export async function getPublicSettings() {
