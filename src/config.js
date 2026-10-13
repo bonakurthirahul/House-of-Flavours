@@ -11,17 +11,15 @@ export const siteConfig = {
   logoUrl: '',
 
   // --- Contact information ---
-  phone: '+91 99480 99296',           // reused from the existing project
-  whatsapp: '919948099296',           // reused from the existing project (used by ordering flow)
-  email: 'your-email@example.com',    // PLACEHOLDER - update with your business email
-  address: 'Your Street, Your City',  // PLACEHOLDER - update with your business address / service area
-  hours: 'Mon - Sun, 11:00 AM - 11:00 PM', // update with your real opening hours
+  phone: '+91 99480 99296',           // existing business line
+  email: 'bonakurthirahul@gmail.com', // confirmed business email (also used for invoice/contact)
+  address: 'Ghanapuram',              // confirmed service-area label
+  hours: 'Mon - Sun, 11:00 AM - 11:00 PM',
 
-  // --- Social media links (PLACEHOLDERS - update or remove) ---
+  // --- Social media links ---
+  // Only the confirmed Instagram account is listed. Facebook/YouTube removed.
   social: {
-    instagram: '#',
-    facebook: '#',
-    youtube: '#'
+    instagram: 'https://www.instagram.com/nexorastudio.10/'
   },
 
   // --- Imagery (reuses the same Unsplash source style already used across the menu) ---

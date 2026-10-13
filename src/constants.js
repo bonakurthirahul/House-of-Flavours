@@ -1,4 +1,3 @@
-export const SHEETDB_URL = "https://sheetdb.io/api/v1/v9fp4uyhz6lwn";
 export const UPI_ID = "9948099296@fam";
 
 export const INITIAL_COUPONS = [

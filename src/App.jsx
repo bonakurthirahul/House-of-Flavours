@@ -1,12 +1,15 @@
-import { useState, useEffect, useMemo } from 'react';
-import { SHEETDB_URL, UPI_ID, INITIAL_COUPONS } from './constants.js';
-import { COMPLETE_DEFAULT_CATALOG, QUICK_UPSELL_ITEMS, mergeMenuSeed, DISH_CATEGORIES } from './data/catalog.js';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { UPI_ID, INITIAL_COUPONS } from './constants.js';
+import { COMPLETE_DEFAULT_CATALOG, QUICK_UPSELL_ITEMS, mergeMenuSeed } from './data/catalog.js';
 import { siteConfig } from './config.js';
 import { useLocalStorage } from './hooks/useLocalStorage.js';
 import { isSupabaseConfigured } from './lib/supabase.js';
-import { registerCustomer, loginCustomer, loginStaff, logout as supabaseLogout, restoreSession, onSupabaseAuthChange } from './lib/authService.js';
-import { isSchemaReady, loadMenuFromDb, syncCatalogToDb, upsertMenuItem, setAvailability, loadOrdersFromDb, placeOrderToDb, updateOrderStatus } from './lib/dbService.js';
-import { Plus, Minus, MessageCircle, Download, RefreshCw, Check } from './components/icons.jsx';
+import { registerCustomer, loginCustomer, logout as supabaseLogout, restoreSession, onSupabaseAuthChange } from './lib/authService.js';
+import { isSchemaReady, loadMenuFromDb, loadOrdersFromDb, placeOrderToDb, getPublicSettings, subscribeToOrders } from './lib/dbService.js';
+import { computeOrderTotals, normalizeSettings, DEFAULT_PRICING_SETTINGS } from './lib/pricing.js';
+import { navigate } from './lib/router.js';
+import { Plus, Minus, Download, ShoppingBag } from './components/icons.jsx';
+import { OrdersView } from './components/OrdersView.jsx';
 import { BrandLogo } from './components/BrandLogo.jsx';
 import { Navbar } from './components/Navbar.jsx';
 import { Hero } from './components/Hero.jsx';
@@ -20,18 +23,15 @@ import { AuthScreen } from './components/AuthScreen.jsx';
 function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [pendingSection, setPendingSection] = useState(null);
-  const [currentUser, setCurrentUser] = useLocalStorage('rahulfoods_active_user_session_v9', null);
+  // Session is NEVER hydrated from localStorage: it is rebuilt from the live
+  // Supabase session (see restoreSession effect below).
+  const [currentUser, setCurrentUser] = useState(null);
   const [isStoreOpen, setIsStoreOpen] = useLocalStorage('rahulfoods_store_open_v9', true);
 
   const [menuItems, setMenuItems] = useLocalStorage('rahulfoods_fresh_2026_catalog_v9', COMPLETE_DEFAULT_CATALOG);
   const [cart, setCart] = useLocalStorage('rahulfoods_active_cart_v9', []);
   const [orders, setOrders] = useLocalStorage('rahulfoods_active_orders_v9', []);
-  const [coupons, setCoupons] = useLocalStorage('rahulfoods_active_coupons_v9', INITIAL_COUPONS);
-
-  // Staff Portal Sub-navigation & Sync
-  const [staffTab, setStaffTab] = useState('live_orders'); // 'live_orders' | 'menu_editor' | 'coupons'
-  const [liveSheetOrders, setLiveSheetOrders] = useState([]);
-  const [isFetchingSheet, setIsFetchingSheet] = useState(false);
+  const [coupons] = useLocalStorage('rahulfoods_active_coupons_v9', INITIAL_COUPONS);
 
   const [selectedCouponCode, setSelectedCouponCode] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState(null);
@@ -49,7 +49,6 @@ function App() {
 
   // Clean Auth Modal States
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState('customer'); // 'customer' | 'staff'
   const [authAction, setAuthAction] = useState('login'); // 'login' | 'register'
   const [inputUser, setInputUser] = useState('');
   const [inputPass, setInputPass] = useState('');
@@ -62,16 +61,16 @@ function App() {
   // Supabase integration state (only active when VITE_SUPABASE_* env vars exist)
   const [supabaseReady, setSupabaseReady] = useState(false);
   const [dbNotice, setDbNotice] = useState('');
-  const [dbOrders, setDbOrders] = useState([]);
   const [dbCustomerOrders, setDbCustomerOrders] = useState([]);
-  const [savingToDb, setSavingToDb] = useState(false);
-  const [dbSaveMessage, setDbSaveMessage] = useState('');
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersError, setOrdersError] = useState('');
 
-  // Menu Editor Edit State
-  const [editingDish, setEditingDish] = useState(null);
-  const [newCouponCode, setNewCouponCode] = useState('');
-  const [newCouponDiscount, setNewCouponDiscount] = useState('');
-  const [newCouponMin, setNewCouponMin] = useState('');
+  // Configurable pricing (GST + delivery) — loaded from the database settings so
+  // the storefront shows exactly what public.place_order() will enforce.
+  const [pricingSettings, setPricingSettings] = useState(DEFAULT_PRICING_SETTINGS);
+
+  // Prevent duplicate checkout submissions (double-click / retry while saving).
+  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
 
   useEffect(() => {
     if (currentUser && currentUser.role === 'customer') {
@@ -136,6 +135,17 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  // Load the configurable GST / delivery settings (public keys only). When the
+  // database is unavailable the safe local defaults (no GST, flat fee) are used.
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabaseReady) return;
+    let active = true;
+    getPublicSettings().then((raw) => {
+      if (active && raw) setPricingSettings(normalizeSettings(raw));
+    });
+    return () => { active = false; };
+  }, [supabaseReady]);
+
   // One-time idempotent menu migration: seeds the curated menu into the stored
   // catalog, removes the old legacy generated dishes, keeps staff-added dishes
   // and preserves staff price/availability edits (see mergeMenuSeed).
@@ -153,324 +163,78 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchSheetOrders = async () => {
-    setIsFetchingSheet(true);
-    try {
-      const res = await fetch(SHEETDB_URL);
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setLiveSheetOrders(data.reverse());
-      }
-    } catch (err) {
-      console.error("SheetDB fetch error:", err);
-    } finally {
-      setIsFetchingSheet(false);
-    }
-  };
-
-  useEffect(() => {
-    if (currentUser && currentUser.role === 'staff' && activeTab === 'admin_portal') {
-      if (isSupabaseConfigured && supabaseReady) {
-        fetchDbOrders();
-      } else {
-        fetchSheetOrders();
-      }
-    }
-  }, [currentUser, activeTab, supabaseReady]);
-
-  const fetchDbOrders = async () => {
-    try {
-      const rows = await loadOrdersFromDb();
-      setDbOrders(rows || []);
-    } catch (err) {
-      setDbNotice('Could not load orders: ' + err.message);
-    }
-  };
-
   const mapOrderRow = (o) => ({
     orderId: o.order_id,
     timestamp: new Date(o.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+    createdAt: o.created_at,
+    cancelledAt: o.cancelled_at || null,
     customer: { name: o.customer_name, phone: o.phone, address: o.address, instructions: o.instructions || '' },
-    items: (o.order_items || []).map((li) => ({ name: li.name, quantity: li.quantity, price: Number(li.price) })),
+    items: (o.order_items || []).map((li) => ({ menuId: li.menu_id, name: li.name, quantity: li.quantity, price: Number(li.price) })),
     subtotal: Number(o.subtotal),
     discountAmount: Number(o.discount),
     gstAmount: Number(o.gst),
+    cgst: Number(o.cgst || 0),
+    sgst: Number(o.sgst || 0),
+    igst: Number(o.igst || 0),
+    gstRate: Number(o.gst_rate || 0),
     deliveryFee: Number(o.delivery_fee),
+    deliveryDistanceKm: o.delivery_distance_km == null ? null : Number(o.delivery_distance_km),
+    deliveryRatePerKm: o.delivery_rate_per_km == null ? null : Number(o.delivery_rate_per_km),
+    paymentStatus: o.payment_status || 'Pending',
     grandTotal: Number(o.total),
     paymentMethod: o.payment_method,
     status: o.status,
     source: 'supabase'
   });
 
-  const handleSyncMenuToDb = async () => {
-    if (!isSupabaseConfigured || !supabaseReady) return;
-    setSavingToDb(true);
-    setDbSaveMessage('');
-    try {
-      await syncCatalogToDb(DISH_CATEGORIES, menuItems);
-      setDbSaveMessage('Menu synced to database.');
-      const dbm = await loadMenuFromDb();
-      if (dbm.items.length) setMenuItems(dbm.items);
-    } catch (err) {
-      setDbSaveMessage('Sync failed: ' + err.message);
-    } finally {
-      setSavingToDb(false);
-    }
-  };
-
-  const handleToggleAvailability = async (dish) => {
-    const next = { ...dish, isAvailable: !dish.isAvailable };
-    setMenuItems(menuItems.map((d) => (d.id === dish.id ? next : d)));
-    if (isSupabaseConfigured && supabaseReady) {
-      try {
-        await setAvailability(dish.id, next.isAvailable);
-      } catch (err) {
-        setDbNotice('Could not save availability: ' + err.message);
-        setMenuItems(menuItems.map((d) => (d.id === dish.id ? { ...d, isAvailable: dish.isAvailable } : d)));
-      }
-    }
-  };
-
-  const handleSaveDish = async () => {
-    if (!editingDish) return;
-    if (!editingDish.name || !editingDish.category || editingDish.price < 0) {
-      setDbSaveMessage('Name, category and a valid price are required.');
-      return;
-    }
-    const saved = menuItems.some((d) => d.id === editingDish.id);
-    if (isSupabaseConfigured && supabaseReady) {
-      setSavingToDb(true);
-      setDbSaveMessage('');
-      try {
-        await upsertMenuItem(editingDish);
-        setDbSaveMessage(saved ? 'Changes saved to database.' : 'New item added to the database.');
-      } catch (err) {
-        setDbSaveMessage('Save failed: ' + err.message);
-        setSavingToDb(false);
-        return;
-      }
-      setSavingToDb(false);
-    }
-    setMenuItems(
-      saved
-        ? menuItems.map((d) => (d.id === editingDish.id ? editingDish : d))
-        : [...menuItems, editingDish]
-    );
-    setEditingDish(null);
-  };
-
-  const handleUpdateOrderStatus = async (orderId, status) => {
-    if (!isSupabaseConfigured || !supabaseReady) return;
-    try {
-      await updateOrderStatus(orderId, status);
-      fetchDbOrders();
-    } catch (err) {
-      setDbNotice('Could not update status: ' + err.message);
-    }
-  };
-
-  // Sheet-Powered Authentication & Automatic User Logging into Google Sheet
+  // Customer authentication. Staff authenticate exclusively at /admin/login.
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     setAuthErrorMsg('');
-    setIsAuthenticating(true);
-
-    const cleanUser = inputUser.trim();
-    const cleanPass = inputPass.trim();
-
-    // ---- SUPABASE AUTH PATH (primary when VITE_SUPABASE_* env vars exist) ----
-    if (isSupabaseConfigured) {
-      try {
-        if (authMode === 'staff') {
-          const res = await loginStaff(cleanUser, cleanPass);
-          if (!res.ok) {
-            setAuthErrorMsg(res.error);
-            return;
-          }
-          setCurrentUser({ ...res.user, role: res.user.role === 'manager' ? 'staff' : res.user.role });
-          setShowAuthModal(false);
-          setInputUser('');
-          setInputPass('');
-          setActiveTab('admin_portal');
-          window.scrollTo({ top: 0 });
-          return;
-        }
-
-        if (authAction === 'login') {
-          const res = await loginCustomer(cleanUser, cleanPass);
-          if (!res.ok) {
-            setAuthErrorMsg(res.error);
-            return;
-          }
-          setCurrentUser(res.user);
-        } else {
-          const res = await registerCustomer({
-            username: cleanUser,
-            password: cleanPass,
-            name: inputName,
-            phone: inputPhone
-          });
-          if (!res.ok) {
-            setAuthErrorMsg(res.error);
-            return;
-          }
-          if (res.needsConfirmation) {
-            setAuthErrorMsg('Account created, but email confirmation is enabled on this Supabase project. Sign-in stays blocked until the owner verifies the account or disables “Confirm email” (Supabase → Authentication → Providers → Email).');
-            return;
-          }
-          setCurrentUser(res.user);
-          setInputName('');
-          setInputPhone('');
-        }
-
-        setShowAuthModal(false);
-        setInputUser('');
-        setInputPass('');
-        try {
-          if (rememberMe) localStorage.setItem('rahulfoods_remember_user_v9', cleanUser);
-          else localStorage.removeItem('rahulfoods_remember_user_v9');
-        } catch (rmErr) {
-          console.warn('Remember-me save failed:', rmErr);
-        }
-      } catch (err) {
-        setAuthErrorMsg('Network error while authenticating. Please try again.');
-      } finally {
-        setIsAuthenticating(false);
-      }
+    if (!isSupabaseConfigured) {
+      setAuthErrorMsg('Authentication is unavailable: Supabase is not configured.');
       return;
     }
 
-    // ---- LEGACY SHEET / LOCALSTORAGE PATH (fallback when Supabase is not configured) ----
-
+    const cleanUser = inputUser.trim();
+    const cleanPass = inputPass.trim();
+    setIsAuthenticating(true);
     try {
-      let sheetUsers = [];
-      try {
-        const res = await fetch(SHEETDB_URL);
-        const data = await res.json();
-        if (Array.isArray(data)) sheetUsers = data;
-      } catch (netErr) {
-        console.warn("SheetDB fetch fallback:", netErr);
-      }
-
-      // STAFF AUTHENTICATION
-      if (authMode === 'staff') {
-        const sheetStaff = sheetUsers.find(
-          u => u.username && u.username.toUpperCase() === cleanUser.toUpperCase() &&
-               u.password === cleanPass &&
-               (u.role && u.role.toLowerCase() === 'staff')
-        );
-
-        if (sheetStaff || (cleanUser.toUpperCase() === 'RAHUL' && cleanPass === 'RAHUL@123')) {
-          const staffSession = {
-            username: cleanUser.toUpperCase(),
-            role: 'staff',
-            name: sheetStaff?.name || 'Kitchen Manager'
-          };
-          setCurrentUser(staffSession);
-          setShowAuthModal(false);
-          setInputUser('');
-          setInputPass('');
-          setActiveTab('admin_portal');
-          setIsAuthenticating(false);
-          return;
-        } else {
-          setAuthErrorMsg('Access Denied: Invalid credentials.');
-          setIsAuthenticating(false);
-          return;
-        }
-      }
-
-      // CUSTOMER AUTHENTICATION
       if (authAction === 'login') {
-        const sheetCustomer = sheetUsers.find(
-          u => u.username && u.username.toLowerCase() === cleanUser.toLowerCase() &&
-               u.password === cleanPass
-        );
-
-        const storedLocal = JSON.parse(localStorage.getItem('rahulfoods_customer_accounts_v9') || '[]');
-        const localCustomer = storedLocal.find(
-          u => u.username && u.username.toLowerCase() === cleanUser.toLowerCase() && u.password === cleanPass
-        );
-
-        const verifiedCust = sheetCustomer || localCustomer;
-
-        if (verifiedCust) {
-          setCurrentUser(verifiedCust);
-          setShowAuthModal(false);
-          setInputUser('');
-          setInputPass('');
-          try {
-            if (rememberMe) localStorage.setItem('rahulfoods_remember_user_v9', cleanUser);
-            else localStorage.removeItem('rahulfoods_remember_user_v9');
-          } catch (rmErr) {
-            console.warn('Remember-me save failed:', rmErr);
-          }
-        } else {
-          setAuthErrorMsg('Incorrect credentials. Please verify your username and password.');
+        const res = await loginCustomer(cleanUser, cleanPass);
+        if (!res.ok) {
+          setAuthErrorMsg(res.error);
+          return;
         }
+        setCurrentUser(res.user);
       } else {
-        // CUSTOMER REGISTRATION - POSTS DIRECTLY TO GOOGLE SHEET
-        if (!cleanUser || !cleanPass || !inputPhone.trim()) {
-          setAuthErrorMsg('Please fill all mandatory fields.');
-          setIsAuthenticating(false);
-          return;
-        }
-
-        const storedLocal = JSON.parse(localStorage.getItem('rahulfoods_customer_accounts_v9') || '[]');
-        if (storedLocal.some(u => u.username.toLowerCase() === cleanUser.toLowerCase())) {
-          setAuthErrorMsg('This username is already taken. Please choose another.');
-          setIsAuthenticating(false);
-          return;
-        }
-
-        const newCust = {
+        const res = await registerCustomer({
           username: cleanUser,
           password: cleanPass,
-          role: 'customer',
-          name: inputName.trim() || cleanUser,
-          phone: inputPhone.trim(),
-          registered_at: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-        };
-
-        // Post new user row to SheetDB / Google Sheet
-        fetch(SHEETDB_URL, {
-          method: 'POST',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            data: [{
-              order_id: `USER-REG-${Date.now().toString().slice(-4)}`,
-              timestamp: newCust.registered_at,
-              customer_name: newCust.name,
-              phone: newCust.phone,
-              address: 'Account Registration',
-              items: `New Account: @${newCust.username}`,
-              total: 0,
-              payment_mode: 'REGISTRATION',
-              instructions: `Password: ${newCust.password} | Role: customer`,
-              username: newCust.username,
-              password: newCust.password,
-              role: 'customer',
-              name: newCust.name
-            }]
-          })
-        }).catch(err => console.error("Sheet registration sync error:", err));
-
-        // Persist locally
-        storedLocal.push(newCust);
-        localStorage.setItem('rahulfoods_customer_accounts_v9', JSON.stringify(storedLocal));
-
-        setCurrentUser(newCust);
-        setShowAuthModal(false);
-        setInputUser('');
-        setInputPass('');
+          name: inputName,
+          phone: inputPhone
+        });
+        if (!res.ok) {
+          setAuthErrorMsg(res.error);
+          return;
+        }
+        if (res.needsConfirmation) {
+          setAuthErrorMsg('Account created, but email confirmation is enabled on this Supabase project. Sign-in stays blocked until the owner verifies the account or disables “Confirm email” (Supabase → Authentication → Providers → Email).');
+          return;
+        }
+        setCurrentUser(res.user);
         setInputName('');
         setInputPhone('');
-        try {
-          if (rememberMe) localStorage.setItem('rahulfoods_remember_user_v9', cleanUser);
-          else localStorage.removeItem('rahulfoods_remember_user_v9');
-        } catch (rmErr) {
-          console.warn('Remember-me save failed:', rmErr);
-        }
+      }
+
+      setShowAuthModal(false);
+      setInputUser('');
+      setInputPass('');
+      try {
+        if (rememberMe) localStorage.setItem('rahulfoods_remember_user_v9', cleanUser);
+        else localStorage.removeItem('rahulfoods_remember_user_v9');
+      } catch (rmErr) {
+        console.warn('Remember-me save failed:', rmErr);
       }
     } catch (err) {
       setAuthErrorMsg('Network error while authenticating. Please try again.');
@@ -527,8 +291,6 @@ function App() {
   };
 
   const subtotal = useMemo(() => cart.reduce((s, i) => s + i.price * i.quantity, 0), [cart]);
-  const deliveryFee = subtotal >= 499 || subtotal === 0 ? 0 : 35;
-  const gstAmount = Math.round(subtotal * 0.05);
 
   const discountAmount = useMemo(() => {
     if (!appliedCoupon) return 0;
@@ -538,7 +300,13 @@ function App() {
       : appliedCoupon.discount;
   }, [appliedCoupon, subtotal]);
 
-  const grandTotal = Math.max(0, subtotal + deliveryFee + (subtotal > 0 ? gstAmount : 0) - discountAmount);
+  // Server-aligned local totals. Flat delivery is shown up front; distance
+  // delivery is resolved at checkout from owner-defined zones (see pricing.js).
+  const totals = useMemo(
+    () => computeOrderTotals({ subtotal, discount: discountAmount, distanceKm: null, settings: pricingSettings }),
+    [subtotal, discountAmount, pricingSettings]
+  );
+  const { deliveryFee, gstAmount, grandTotal } = totals;
   const totalCartCount = useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
   const handleApplyCoupon = (e) => {
@@ -558,6 +326,7 @@ function App() {
 
   const handleProceedOrder = async (e) => {
     e.preventDefault();
+    if (isPlacingOrder) return;
     if (!isStoreOpen) {
       alert("The kitchen is currently closed. We are not accepting orders right now.");
       return;
@@ -567,109 +336,71 @@ function App() {
       alert('Please enter Name, Phone Number, and Delivery Address.');
       return;
     }
-
-    // ---- SUPABASE ORDER PATH (transactional, server-side pricing) ----
-    if (isSupabaseConfigured && supabaseReady) {
-      const orderId = `RF-${Date.now().toString().slice(-5)}`;
-      const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-      try {
-        const placed = await placeOrderToDb({
-          orderId,
-          customerName: checkoutName.trim(),
-          phone: checkoutPhone.trim(),
-          address: checkoutAddress,
-          instructions: cookingInstructions,
-          paymentMethod,
-          discount: discountAmount,
-          items: cart.map((i) => ({
-            ...i,
-            // Only genuine DB menu items carry a menu_id; extras are priced client-side (clamped in DB).
-            menuId: menuItems.some((d) => d.id === i.id) ? i.id : null
-          }))
-        });
-        const newOrder = {
-          orderId: placed.order_id,
-          timestamp,
-          userId: currentUser ? currentUser.username || 'guest' : 'guest',
-          customer: { name: checkoutName.trim(), phone: checkoutPhone.trim(), address: checkoutAddress, instructions: cookingInstructions },
-          items: [...cart],
-          subtotal: Number(placed.subtotal),
-          discountAmount: Number(placed.discount),
-          gstAmount: Number(placed.gst),
-          deliveryFee: Number(placed.delivery_fee),
-          grandTotal: Number(placed.total),
-          paymentMethod,
-          status: 'Order Received',
-          source: 'supabase'
-        };
-        setOrders([newOrder, ...orders]);
-        setLatestCompletedOrder(newOrder);
-        if (currentUser?.role === 'staff') setDbOrders((prev) => [newOrder, ...prev]);
-
-        const itemsSummary = cart.map(i => `${i.name} (x${i.quantity})`).join(', ');
-        let message = `🍽️ *NEW ORDER - HOUSE OF FLAVOURS* 🍽️\n📋 *Order ID:* #${orderId}\n⏰ *Time:* ${timestamp}\n\n👤 *CUSTOMER:*\n• ${checkoutName} (${checkoutPhone})\n• ${checkoutAddress}\n`;
-        if (cookingInstructions.trim()) message += `• Note: "${cookingInstructions}"\n`;
-        message += `\n📦 *ITEMS:*\n${itemsSummary}\n\n💳 *TOTAL PAYABLE:* ₹${newOrder.grandTotal} (${paymentMethod})`;
-        window.open(`https://wa.me/919948099296?text=${encodeURIComponent(message)}`, '_blank');
-        setCart([]);
-      } catch (err) {
-        setDbNotice('Order could not be saved: ' + err.message + ' Your cart was kept; please retry.');
-      }
+    // In distance mode the fee cannot be shown until the address is matched to a
+    // verified zone. The server is authoritative; block rather than guess.
+    if (pricingSettings.deliveryMode === 'distance' && !totals.deliveryOk) {
+      alert('Delivery charges for your area are confirmed by the kitchen. Please place the order and we will confirm the exact delivery charge, or call us to verify your location.');
       return;
     }
 
+    // Orders are created exclusively through Supabase. If the database is not
+    // reachable we surface the reason and KEEP the cart — we never fabricate a
+    // local order or fall back to any external ordering flow.
+    if (!isSupabaseConfigured || !supabaseReady) {
+      setDbNotice('Orders are unavailable right now because the database is not connected. Your cart has been kept — please try again shortly.');
+      return;
+    }
+
+    setIsPlacingOrder(true);
     const orderId = `RF-${Date.now().toString().slice(-5)}`;
     const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-    const itemsSummary = cart.map(i => `${i.name} (x${i.quantity})`).join(', ');
-
-    const newOrder = {
-      orderId,
-      timestamp,
-      userId: currentUser ? currentUser.username : 'guest',
-      customer: { name: checkoutName, phone: checkoutPhone, address: checkoutAddress, instructions: cookingInstructions },
-      items: [...cart],
-      subtotal,
-      discountAmount,
-      gstAmount,
-      deliveryFee,
-      grandTotal,
-      paymentMethod,
-      status: 'Order Received'
-    };
-
-    setOrders([newOrder, ...orders]);
-    setLatestCompletedOrder(newOrder);
-
-    // SheetDB integration - Push Order
-    fetch(SHEETDB_URL, {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [{
-          order_id: orderId,
-          timestamp,
-          customer_name: checkoutName.trim(),
-          phone: checkoutPhone.trim(),
-          address: checkoutAddress,
-          items: itemsSummary,
-          total: grandTotal,
-          payment_mode: paymentMethod,
-          instructions: cookingInstructions.trim() || 'None'
-        }]
-      })
-    }).then(() => fetchSheetOrders()).catch(err => console.error("SheetDB error:", err));
-
-    // WhatsApp message trigger
-    let message = `🍽️ *NEW ORDER - HOUSE OF FLAVOURS* 🍽️\n📋 *Order ID:* #${orderId}\n⏰ *Time:* ${timestamp}\n\n👤 *CUSTOMER:*\n• ${checkoutName} (${checkoutPhone})\n• ${checkoutAddress}\n`;
-    if (cookingInstructions.trim()) message += `• Note: "${cookingInstructions}"\n`;
-    message += `\n📦 *ITEMS:*\n`;
-    cart.forEach((it, idx) => {
-      message += `${idx + 1}. ${it.name} [x${it.quantity}] - ₹${it.price * it.quantity}\n`;
-    });
-    message += `\n💳 *TOTAL PAYABLE:* ₹${grandTotal} (${paymentMethod})`;
-
-    window.open(`https://wa.me/919948099296?text=${encodeURIComponent(message)}`, '_blank');
-    setCart([]);
+    try {
+      const placed = await placeOrderToDb({
+        orderId,
+        customerName: checkoutName.trim(),
+        phone: checkoutPhone.trim(),
+        address: checkoutAddress,
+        instructions: cookingInstructions,
+        paymentMethod,
+        discount: discountAmount,
+        items: cart.map((i) => ({
+          ...i,
+          // Only genuine DB menu items carry a menu_id; extras are priced client-side (clamped in DB).
+          menuId: menuItems.some((d) => d.id === i.id) ? i.id : null
+        }))
+      });
+      const newOrder = {
+        orderId: placed.order_id,
+        timestamp,
+        createdAt: new Date().toISOString(),
+        userId: currentUser ? currentUser.username || 'guest' : 'guest',
+        customer: { name: checkoutName.trim(), phone: checkoutPhone.trim(), address: checkoutAddress, instructions: cookingInstructions },
+        items: [...cart],
+        subtotal: Number(placed.subtotal),
+        discountAmount: Number(placed.discount),
+        gstAmount: Number(placed.gst),
+        cgst: Number(placed.cgst || 0),
+        sgst: Number(placed.sgst || 0),
+        igst: Number(placed.igst || 0),
+        gstRate: Number(placed.gst_rate || 0),
+        deliveryFee: Number(placed.delivery_fee),
+        deliveryDistanceKm: placed.delivery_distance_km == null ? null : Number(placed.delivery_distance_km),
+        deliveryRatePerKm: placed.delivery_rate_per_km == null ? null : Number(placed.delivery_rate_per_km),
+        paymentStatus: placed.payment_status || 'Pending',
+        grandTotal: Number(placed.total),
+        paymentMethod,
+        status: 'Order Received',
+        source: 'supabase'
+      };
+      // Success is only ever reached after Supabase confirms the saved order.
+      setOrders((prev) => [newOrder, ...prev]);
+      setLatestCompletedOrder(newOrder);
+      setCart([]);
+    } catch (err) {
+      setDbNotice('Order could not be saved: ' + err.message + ' Your cart was kept; please retry.');
+    } finally {
+      setIsPlacingOrder(false);
+    }
   };
 
   // Download Invoice Action (HTML/PDF format)
@@ -703,23 +434,30 @@ function App() {
     <strong>Customer:</strong> ${order.customer?.name}<br>
     <strong>Phone:</strong> ${order.customer?.phone}<br>
     <strong>Delivery Address:</strong> ${order.customer?.address}<br>
-    <strong>Payment:</strong> ${order.paymentMethod}
+    <strong>Payment:</strong> ${order.paymentMethod}${pricingSettings.gstRegistered && pricingSettings.gstin ? `<br><strong>GSTIN:</strong> ${pricingSettings.gstin}` : ''}
   </div>
   <table>
-    <thead><tr><th>Item</th><th>Qty</th><th style="text-align:right">Price</th></tr></thead>
+    <thead><tr><th>Item</th><th>Qty</th><th style="text-align:right">Unit</th><th style="text-align:right">Line total</th></tr></thead>
     <tbody>
-      ${order.items.map(it => `<tr><td>${it.name}</td><td>${it.quantity}</td><td style="text-align:right">₹${it.price * it.quantity}</td></tr>`).join('')}
+      ${order.items.map(it => `<tr><td>${it.name}</td><td>${it.quantity}</td><td style="text-align:right">₹${it.price}</td><td style="text-align:right">₹${(Number(it.price) * it.quantity).toFixed(2)}</td></tr>`).join('')}
     </tbody>
   </table>
   <div class="total-box">
     <div>Subtotal: ₹${order.subtotal}</div>
     ${order.discountAmount > 0 ? `<div style="color: green">Discount: -₹${order.discountAmount}</div>` : ''}
-    <div>GST (5%): ₹${order.gstAmount}</div>
-    <div>Delivery Fee: ${order.deliveryFee === 0 ? 'FREE' : `₹${order.deliveryFee}`}</div>
+    ${order.gstAmount > 0 ? (order.igst > 0
+      ? `<div>IGST: ₹${order.igst}</div>`
+      : `<div>CGST: ₹${order.cgst ?? 0}</div><div>SGST: ₹${order.sgst ?? 0}</div>`) : ''}
+    <div>Delivery Fee: ${order.deliveryFee === 0 ? 'FREE' : `₹${order.deliveryFee}`}${order.deliveryDistanceKm != null ? ` (${order.deliveryDistanceKm} km @ ₹${order.deliveryRatePerKm}/km)` : ''}</div>
     <div class="grand">Grand Total: ₹${order.grandTotal}</div>
   </div>
+  <div class="details">
+    <strong>Payment method:</strong> ${order.paymentMethod}<br>
+    <strong>Payment status:</strong> ${order.paymentStatus || 'Pending'}<br>
+    <strong>Order status:</strong> ${order.status}
+  </div>
   <div class="footer">
-    Thank you for ordering with House of Flavours! For queries: WhatsApp ${siteConfig.phone}
+    Thank you for ordering with House of Flavours! Queries: ${siteConfig.phone} · ${siteConfig.email} · ${siteConfig.address}
   </div>
 </body>
 </html>`;
@@ -749,14 +487,29 @@ function App() {
     return Array.from(merged.values());
   }, [dbCustomerOrders, userScopedOrders]);
 
-  // Customer: load their own persisted orders from Supabase (RLS returns only their rows).
+  // Customer: load their own persisted orders from Supabase (RLS returns only
+  // their rows). Relay loading/error so the Orders page can show real states.
+  const refreshCustomerOrders = useCallback(() => {
+    if (!isSupabaseConfigured || !supabaseReady || !currentUser) return Promise.resolve();
+    setOrdersLoading(true);
+    setOrdersError('');
+    return loadOrdersFromDb()
+      .then((rows) => setDbCustomerOrders(rows || []))
+      .catch((err) => setOrdersError(err?.message || 'Could not load your orders.'))
+      .finally(() => setOrdersLoading(false));
+  }, [isSupabaseConfigured, supabaseReady, currentUser]);
+
   useEffect(() => {
-    if (activeTab === 'orders' && isSupabaseConfigured && supabaseReady && currentUser) {
-      loadOrdersFromDb()
-        .then((rows) => setDbCustomerOrders(rows || []))
-        .catch(() => {});
-    }
-  }, [activeTab, isSupabaseConfigured, supabaseReady, currentUser]);
+    if (activeTab === 'orders' && currentUser) refreshCustomerOrders();
+  }, [activeTab, currentUser, refreshCustomerOrders]);
+
+  // Live status/cancellation updates for the signed-in customer. RLS limits the
+  // payload to their own rows, so this never leaks other customers' orders.
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabaseReady || !currentUser) return undefined;
+    const unsubscribe = subscribeToOrders(() => { refreshCustomerOrders(); }, { channelName: 'customer-orders' });
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+  }, [isSupabaseConfigured, supabaseReady, currentUser, refreshCustomerOrders]);
 
   const filteredDishes = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -771,6 +524,9 @@ function App() {
     });
   }, [menuItems, searchQuery, selectedCategory]);
 
+  // Lookup for order-item thumbnails (order_items store menu_id + name + price).
+  const menuById = useMemo(() => Object.fromEntries(menuItems.map((d) => [d.id, d])), [menuItems]);
+
   return (
     <div className="min-h-screen flex flex-col bg-night-950 text-cream-100">
 
@@ -782,7 +538,7 @@ function App() {
         onOpenOrders={() => { setActiveTab('orders'); window.scrollTo({ top: 0 }); }}
         onLogin={() => { setShowAuthModal(true); setAuthErrorMsg(''); }}
         onLogout={handleLogout}
-        onOpenStaff={() => { setActiveTab('admin_portal'); window.scrollTo({ top: 0 }); }}
+        onOpenStaff={() => navigate('/admin')}
         currentUser={currentUser}
         totalCartCount={totalCartCount}
       />
@@ -903,7 +659,7 @@ function App() {
               <div className="bg-white rounded-2xl p-3.5 sm:p-4 border border-stone-200 space-y-2 text-xs">
                 <h3 className="font-bold text-stone-800">Delivery Information</h3>
                 <input type="text" placeholder="Full Name *" value={checkoutName} onChange={(e) => setCheckoutName(e.target.value)} className="w-full px-3 py-2 border rounded-xl outline-none" />
-                <input type="tel" placeholder="WhatsApp Number *" value={checkoutPhone} onChange={(e) => setCheckoutPhone(e.target.value)} className="w-full px-3 py-2 border rounded-xl outline-none" />
+                <input type="tel" placeholder="Mobile Number *" value={checkoutPhone} onChange={(e) => setCheckoutPhone(e.target.value)} className="w-full px-3 py-2 border rounded-xl outline-none" />
                 <textarea placeholder="Delivery Address *" value={checkoutAddress} onChange={(e) => setCheckoutAddress(e.target.value)} className="w-full px-3 py-2 border rounded-xl outline-none" rows="2"></textarea>
 
                 {/* Payment Selector */}
@@ -927,7 +683,7 @@ function App() {
                   <div className="bg-stone-50 border border-stone-200 p-2.5 rounded-xl text-center space-y-1">
                     <p className="text-[11px] font-bold text-stone-700">Scan & Pay via UPI: <span className="text-amber-800">{UPI_ID}</span></p>
                     <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=upi://pay?pa=${UPI_ID}%26pn=RAHUL%20FOODS%26am=${grandTotal}`}
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=upi://pay?pa=${UPI_ID}%26pn=HOUSE%20OF%20FLAVOURS%26am=${grandTotal}`}
                       alt="UPI QR Code"
                       className="w-24 h-24 mx-auto border rounded-lg p-1 bg-white"
                     />
@@ -935,16 +691,30 @@ function App() {
                 )}
               </div>
 
-              {/* Final Calculation */}
-              <div className="bg-stone-900 text-white p-3.5 sm:p-4 rounded-2xl flex justify-between items-center shadow-lg">
-                <div>
-                  <div className="text-[10px] sm:text-[11px] text-stone-400">Grand Total</div>
-                  <div className="text-lg sm:text-xl font-black text-amber-400">₹{grandTotal}</div>
+              {/* Order summary + place order */}
+              <div className="bg-stone-900 text-white p-3.5 sm:p-4 rounded-2xl shadow-lg space-y-2">
+                <div className="flex justify-between text-[11px] text-stone-300"><span>Subtotal</span><span>₹{subtotal}</span></div>
+                {discountAmount > 0 && <div className="flex justify-between text-[11px] text-emerald-400"><span>Discount</span><span>-₹{discountAmount}</span></div>}
+                {gstAmount > 0 && <div className="flex justify-between text-[11px] text-stone-300"><span>GST</span><span>₹{gstAmount}</span></div>}
+                <div className="flex justify-between text-[11px] text-stone-300"><span>Delivery</span><span>{deliveryFee === 0 ? 'FREE' : `₹${deliveryFee}`}</span></div>
+                <div className="flex justify-between items-center pt-2 border-t border-white/10">
+                  <span className="text-[11px] text-stone-400">Grand Total</span>
+                  <span className="text-lg sm:text-xl font-black text-amber-400">₹{grandTotal}</span>
                 </div>
-                <button onClick={handleProceedOrder} className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-md">
-                  <MessageCircle className="w-4 h-4 fill-white" />
-                  <span>Order on WhatsApp</span>
+                <button
+                  onClick={handleProceedOrder}
+                  disabled={isPlacingOrder || !isSupabaseConfigured || !supabaseReady}
+                  className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md"
+                >
+                  <ShoppingBag className="w-4 h-4" />
+                  <span>{isPlacingOrder ? 'Placing order…' : 'Place Order'}</span>
                 </button>
+                {(!isSupabaseConfigured || !supabaseReady) && (
+                  <p className="text-[10px] text-amber-300 text-center">Checkout is temporarily unavailable while the ordering system reconnects.</p>
+                )}
+                {totals.deliveryMode === 'distance' && !totals.deliveryOk && (
+                  <p className="text-[10px] text-amber-300 text-center">Delivery charge is confirmed by the kitchen from your verified location.</p>
+                )}
               </div>
             </div>
           )}
@@ -953,413 +723,20 @@ function App() {
 
       {/* VIEW: MY ORDERS */}
       {activeTab === 'orders' && (
-        <main className="flex-1 max-w-2xl w-full mx-auto p-3.5 sm:p-6 bg-stone-100 text-stone-900">
-          <div className="flex justify-between items-center mb-3 sm:mb-4">
-            <h2 className="text-lg sm:text-xl font-black">Order History</h2>
-            {!currentUser && (
-              <button onClick={() => setShowAuthModal(true)} className="text-xs font-bold text-amber-700 underline">
-                Log in for personal history
-              </button>
-            )}
-          </div>
-
-          {customerOrders.length === 0 ? (
-            <div className="bg-white p-8 rounded-2xl text-center text-xs text-stone-400 border border-stone-200">
-              {currentUser
-                ? `No past orders recorded for ${currentUser.name}.`
-                : 'Log in to view your orders.'}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {customerOrders.map((o) => (
-                <div key={o.orderId} className="bg-white p-3.5 sm:p-4 rounded-2xl border border-stone-200 text-xs shadow-xs">
-                  <div className="flex justify-between items-center font-bold mb-1">
-                    <span className="text-amber-800">#{o.orderId}</span>
-                    <span className="text-sm font-black">₹{o.grandTotal}</span>
-                  </div>
-                  <div className="text-stone-400 text-[10px] mb-2">{o.timestamp}</div>
-                  <div className="text-stone-700 leading-relaxed">{o.items.map(it => `${it.name} (x${it.quantity})`).join(', ')}</div>
-                  <div className="mt-2.5 pt-2 border-t border-stone-100 flex justify-between items-center text-[11px]">
-                    <span className="text-emerald-700 font-bold">{o.status}</span>
-                    <button onClick={() => setLatestCompletedOrder(o)} className="text-amber-700 font-bold underline flex items-center gap-1">
-                      <Download className="w-3 h-3" /> Invoice
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </main>
-      )}
-
-      {/* VIEW: KITCHEN STAFF DASHBOARD (FULL FEATURES RESTORED) */}
-      {activeTab === 'admin_portal' && currentUser?.role === 'staff' && (
-        <main className="flex-1 max-w-6xl w-full mx-auto p-3.5 sm:p-6 bg-stone-100 text-stone-900">
-
-          {/* Kitchen Header with Master Toggle */}
-          <div className="bg-purple-950 text-white p-4 sm:p-6 rounded-3xl mb-4 sm:mb-6 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <BrandLogo className="w-8 h-8" />
-                <span className="bg-purple-800 text-purple-200 text-xs px-2.5 py-0.5 rounded-full font-bold">Kitchen Ops</span>
-                {isSupabaseConfigured && supabaseReady ? (
-                  <span className="text-emerald-400 text-xs flex items-center gap-1">● Database Synced</span>
-                ) : (
-                  <span className="text-emerald-400 text-xs flex items-center gap-1">● Live Sheet Synced</span>
-                )}
-              </div>
-              <h2 className="text-xl font-black">Manager Control Center</h2>
-              <p className="text-xs text-purple-300">Logged in as {currentUser.name}</p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={() => setIsStoreOpen(!isStoreOpen)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 ${isStoreOpen ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-rose-600 hover:bg-rose-700 text-white'}`}
-              >
-                <span>Store: {isStoreOpen ? 'OPEN' : 'CLOSED'}</span>
-              </button>
-
-              {isSupabaseConfigured && supabaseReady ? (
-                <>
-                  <button
-                    onClick={handleSyncMenuToDb}
-                    disabled={savingToDb}
-                    className="px-3 py-1.5 bg-purple-800 hover:bg-purple-700 rounded-xl text-xs font-bold flex items-center gap-1 text-white disabled:opacity-60"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${savingToDb ? 'animate-spin' : ''}`} />
-                    <span>Sync Menu &amp; DB</span>
-                  </button>
-                  <button
-                    onClick={fetchDbOrders}
-                    className="px-3 py-1.5 bg-stone-900 hover:bg-black rounded-xl text-xs font-bold flex items-center gap-1 text-white"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Refresh Orders</span>
-                  </button>
-                </>
-              ) : (
-                <button
-                  onClick={fetchSheetOrders}
-                  className="px-3 py-1.5 bg-purple-800 hover:bg-purple-700 rounded-xl text-xs font-bold flex items-center gap-1 text-white"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isFetchingSheet ? 'animate-spin' : ''}`} />
-                  <span>Sync Sheet</span>
-                </button>
-              )}
-
-              {dbSaveMessage && (
-                <span className="text-emerald-400 text-[11px] font-bold flex items-center gap-1">
-                  <Check className="w-3.5 h-3.5" /> {dbSaveMessage}
-                </span>
-              )}
-
-              <button onClick={handleLogout} className="px-3 py-1.5 bg-stone-900 hover:bg-black rounded-xl text-xs font-bold text-white">
-                Sign Out
-              </button>
-            </div>
-          </div>
-
-          {/* Staff Sub-Tabs */}
-          <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-4 no-scrollbar">
-            <button
-              onClick={() => setStaffTab('live_orders')}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${staffTab === 'live_orders' ? 'bg-purple-900 text-white' : 'bg-white border text-stone-700'}`}
-            >
-              Live Orders ({isSupabaseConfigured && supabaseReady ? dbOrders.length : liveSheetOrders.length})
-            </button>
-            <button
-              onClick={() => setStaffTab('menu_editor')}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${staffTab === 'menu_editor' ? 'bg-purple-900 text-white' : 'bg-white border text-stone-700'}`}
-            >
-              Menu Item Editor ({menuItems.length})
-            </button>
-            <button
-              onClick={() => setStaffTab('coupons')}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${staffTab === 'coupons' ? 'bg-purple-900 text-white' : 'bg-white border text-stone-700'}`}
-            >
-              Coupons & Discounts ({coupons.length})
-            </button>
-          </div>
-
-          {/* TAB 1: LIVE ORDERS QUEUE */}
-          {staffTab === 'live_orders' && (
-            <div className="space-y-3">
-              {isSupabaseConfigured && supabaseReady ? (
-                dbOrders.length === 0 ? (
-                  <div className="bg-white p-8 rounded-2xl text-center text-xs text-stone-400">No orders in the database yet.</div>
-                ) : (
-                  dbOrders.map((ord) => {
-                    const o = mapOrderRow(ord);
-                    return (
-                      <div key={o.orderId} className="bg-white p-3.5 sm:p-4 rounded-2xl border border-stone-200 text-xs shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="font-black text-sm">#{o.orderId}</span>
-                            <span className="text-stone-400 text-[10px]">{o.timestamp}</span>
-                            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[9px]">{o.paymentMethod}</span>
-                            <span className={`px-2 py-0.5 rounded font-bold text-[9px] ${o.status === 'Order Received' ? 'bg-amber-100 text-amber-800' : 'bg-purple-100 text-purple-800'}`}>{o.status}</span>
-                          </div>
-                          <div className="font-semibold text-stone-800">{o.customer.name} • <span className="text-amber-700 font-bold">{o.customer.phone}</span></div>
-                          <div className="text-stone-500 text-[11px] mt-0.5">{o.customer.address}</div>
-                          {o.customer.instructions && (
-                            <div className="text-amber-800 font-semibold text-[11px] mt-0.5">Note: "{o.customer.instructions}"</div>
-                          )}
-                          <div className="text-stone-700 mt-1">Items: {o.items.map(it => `${it.name} (x${it.quantity})`).join(', ')}</div>
-                        </div>
-
-                        <div className="flex md:flex-col items-center md:items-end justify-between border-t md:border-t-0 pt-2 md:pt-0 gap-2">
-                          <div className="text-base font-black text-amber-700">₹{o.grandTotal}</div>
-                          <div className="flex items-center gap-2">
-                            <select
-                              value={o.status}
-                              onChange={(ev) => handleUpdateOrderStatus(o.orderId, ev.target.value)}
-                              className="px-2 py-1 rounded-lg border text-[10px] font-bold bg-white"
-                              aria-label={`Status for ${o.orderId}`}
-                            >
-                              {['Order Received', 'Preparing', 'Out for Delivery', 'Delivered', 'Cancelled'].map((s) => (
-                                <option key={s} value={s}>{s}</option>
-                              ))}
-                            </select>
-                            <a
-                              href={`https://wa.me/91${(o.customer.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(`Hi ${o.customer.name}, your House of Flavours order #${o.orderId} is ${o.status.toLowerCase()}.`)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold"
-                            >
-                              WhatsApp
-                            </a>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )
-              ) : (
-                <>
-                  {isFetchingSheet && liveSheetOrders.length === 0 ? (
-                    <div className="bg-white p-8 rounded-2xl text-center text-xs text-stone-400">Syncing orders directly from Google Sheet...</div>
-                  ) : liveSheetOrders.length === 0 ? (
-                    <div className="bg-white p-8 rounded-2xl text-center text-xs text-stone-400">No orders logged in Google Sheet yet.</div>
-                  ) : (
-                    liveSheetOrders.map((ord, idx) => (
-                      <div key={idx} className="bg-white p-3.5 sm:p-4 rounded-2xl border border-stone-200 text-xs shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="font-black text-sm">#{ord.order_id || 'RF-ORDER'}</span>
-                            <span className="text-stone-400 text-[10px]">{ord.timestamp}</span>
-                            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[9px]">{ord.payment_mode || 'COD'}</span>
-                          </div>
-                          <div className="font-semibold text-stone-800">{ord.customer_name} • <span className="text-amber-700 font-bold">{ord.phone}</span></div>
-                          <div className="text-stone-500 text-[11px] mt-0.5">{ord.address}</div>
-                          {ord.instructions && ord.instructions !== 'None' && (
-                            <div className="text-amber-800 font-semibold text-[11px] mt-0.5">Note: "{ord.instructions}"</div>
-                          )}
-                          <div className="text-stone-700 mt-1">Dishes: {ord.items}</div>
-                        </div>
-
-                        <div className="flex md:flex-col items-center md:items-end justify-between border-t md:border-t-0 pt-2 md:pt-0">
-                          <div className="text-base font-black text-amber-700">₹{ord.total}</div>
-                          <a
-                            href={`https://wa.me/91${(ord.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(`Hi ${ord.customer_name}, your House of Flavours order #${ord.order_id} is being prepared fresh!`)}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mt-1 px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold"
-                          >
-                            WhatsApp Customer
-                          </a>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {/* TAB 2: MENU ITEM CRUD EDITOR */}
-          {staffTab === 'menu_editor' && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <p className="text-[11px] text-stone-500">
-                  {isSupabaseConfigured && supabaseReady
-                    ? 'Changes are saved to the database immediately.'
-                    : 'Changes are saved locally (Supabase not configured).'}
-                </p>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setEditingDish({
-                      id: `hof_new_${Date.now().toString().slice(-6)}`,
-                      name: '',
-                      description: '',
-                      price: 0,
-                      image: '',
-                      category: 'Starters',
-                      isVeg: true,
-                      isAvailable: true
-                    })}
-                    className="px-3.5 py-1.5 bg-purple-900 text-white rounded-xl text-xs font-bold"
-                  >
-                    + Add New Item
-                  </button>
-                  {isSupabaseConfigured && supabaseReady && (
-                    <button
-                      onClick={handleSyncMenuToDb}
-                      disabled={savingToDb}
-                      className="px-3.5 py-1.5 bg-stone-900 text-white rounded-xl text-xs font-bold disabled:opacity-60"
-                    >
-                      {savingToDb ? 'Syncing...' : 'Sync to Database'}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {menuItems.map((dish) => (
-                <div key={dish.id} className="bg-white p-3 rounded-2xl border border-stone-200 flex items-center justify-between gap-3 text-xs shadow-xs">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <img src={dish.image || '/placeholder.svg'} alt={dish.name} className="w-12 h-12 rounded-xl object-cover shrink-0" onError={(e) => { if (e.currentTarget.src && !e.currentTarget.src.includes('/placeholder.svg')) e.currentTarget.src = '/placeholder.svg'; }} />
-                    <div className="min-w-0">
-                      <div className="font-bold text-stone-900 leading-snug truncate">{dish.name}</div>
-                      <div className="text-stone-500 text-[11px]"><span className={`font-bold ${dish.isVeg ? 'text-emerald-700' : 'text-rose-700'}`}>{dish.isVeg ? 'VEG' : 'NON-VEG'}</span> • {dish.category} • <strong className="text-amber-700">₹{dish.price}</strong></div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      onClick={() => handleToggleAvailability(dish)}
-                      className={`px-2 py-1 rounded-lg text-[10px] font-bold transition ${dish.isAvailable ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}
-                    >
-                      {dish.isAvailable ? 'In Stock' : 'Sold Out'}
-                    </button>
-                    <button
-                      onClick={() => setEditingDish({ ...dish })}
-                      className="px-2 py-1 bg-stone-100 hover:bg-stone-200 rounded-lg text-[10px] font-bold"
-                    >
-                      Edit Price
-                    </button>
-                  </div>
-                </div>
-              ))}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: COUPONS MANAGEMENT */}
-          {staffTab === 'coupons' && (
-            <div className="space-y-4">
-              {/* Create New Coupon */}
-              <div className="bg-white p-4 rounded-2xl border border-stone-200">
-                <h3 className="font-bold text-xs mb-2">Create New Coupon</h3>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input type="text" placeholder="Coupon Code (e.g. EXTRA50)" value={newCouponCode} onChange={(e) => setNewCouponCode(e.target.value)} className="px-3 py-2 text-xs border rounded-xl outline-none flex-1 uppercase" />
-                  <input type="number" placeholder="Discount Amount (₹)" value={newCouponDiscount} onChange={(e) => setNewCouponDiscount(e.target.value)} className="px-3 py-2 text-xs border rounded-xl outline-none w-32" />
-                  <input type="number" placeholder="Min Order (₹)" value={newCouponMin} onChange={(e) => setNewCouponMin(e.target.value)} className="px-3 py-2 text-xs border rounded-xl outline-none w-32" />
-                  <button
-                    onClick={() => {
-                      if (!newCouponCode.trim() || !newCouponDiscount) return;
-                      setCoupons([...coupons, {
-                        code: newCouponCode.trim().toUpperCase(),
-                        discount: Number(newCouponDiscount),
-                        minOrder: Number(newCouponMin) || 0,
-                        type: 'flat',
-                        active: true
-                      }]);
-                      setNewCouponCode('');
-                      setNewCouponDiscount('');
-                      setNewCouponMin('');
-                    }}
-                    className="px-4 py-2 bg-purple-900 text-white rounded-xl text-xs font-bold"
-                  >
-                    Add Coupon
-                  </button>
-                </div>
-              </div>
-
-              {/* Active Coupons List */}
-              <div className="space-y-2">
-                {coupons.map((c) => (
-                  <div key={c.code} className="bg-white p-3 rounded-xl border border-stone-200 flex justify-between items-center text-xs">
-                    <div>
-                      <span className="font-black text-purple-900">{c.code}</span>
-                      <span className="text-stone-500 ml-2">₹{c.discount} OFF on orders above ₹{c.minOrder}</span>
-                    </div>
-                    <button
-                      onClick={() => setCoupons(coupons.map(x => x.code === c.code ? { ...x, active: !x.active } : x))}
-                      className={`px-2.5 py-1 rounded-lg text-[10px] font-bold ${c.active ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}
-                    >
-                      {c.active ? 'ACTIVE' : 'DISABLED'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </main>
+        <OrdersView
+          orders={customerOrders}
+          currentUser={currentUser}
+          loading={ordersLoading}
+          error={ordersError}
+          onRefresh={refreshCustomerOrders}
+          onLogin={() => { setShowAuthModal(true); setAuthErrorMsg(''); }}
+          onViewInvoice={(o) => setLatestCompletedOrder(o)}
+          menuById={menuById}
+        />
       )}
 
       {/* Footer (shown on all views) */}
       <Footer onNavigate={goToSection} />
-
-      {/* EDIT DISH MODAL */}
-      {editingDish && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white p-5 rounded-2xl max-w-md w-full shadow-2xl text-xs max-h-[90vh] overflow-y-auto">
-            <h3 className="font-bold text-sm mb-3">{menuItems.some(d => d.id === editingDish.id) ? `Edit Item: ${editingDish.name}` : 'Add New Menu Item'}</h3>
-            <div className="space-y-2.5">
-              <div>
-                <label className="font-bold block mb-1 text-stone-600">Name *</label>
-                <input type="text" value={editingDish.name} onChange={(e) => setEditingDish({ ...editingDish, name: e.target.value })} className="w-full px-3 py-2 border rounded-xl outline-none" />
-              </div>
-              <div>
-                <label className="font-bold block mb-1 text-stone-600">Description</label>
-                <textarea value={editingDish.description || ''} onChange={(e) => setEditingDish({ ...editingDish, description: e.target.value })} className="w-full px-3 py-2 border rounded-xl outline-none" rows="2"></textarea>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="font-bold block mb-1 text-stone-600">Price (₹) *</label>
-                  <input type="number" min="0" value={editingDish.price} onChange={(e) => setEditingDish({ ...editingDish, price: Number(e.target.value) })} className="w-full px-3 py-2 border rounded-xl outline-none text-sm font-bold" />
-                </div>
-                <div>
-                  <label className="font-bold block mb-1 text-stone-600">Category *</label>
-                  <select value={editingDish.category} onChange={(e) => setEditingDish({ ...editingDish, category: e.target.value })} className="w-full px-3 py-2 border rounded-xl outline-none bg-white">
-                    {DISH_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="font-bold block mb-1 text-stone-600">Image URL</label>
-                <input type="text" value={editingDish.image || ''} onChange={(e) => setEditingDish({ ...editingDish, image: e.target.value })} className="w-full px-3 py-2 border rounded-xl outline-none" placeholder="https://..." />
-                {editingDish.image && (
-                  <img src={editingDish.image} alt="preview" className="mt-2 h-16 w-full object-cover rounded-xl" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
-                )}
-              </div>
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 font-bold text-stone-600 cursor-pointer">
-                  <input type="checkbox" checked={editingDish.isVeg} onChange={(e) => setEditingDish({ ...editingDish, isVeg: e.target.checked })} className="accent-emerald-600" />
-                  Vegetarian
-                </label>
-                <label className="flex items-center gap-2 font-bold text-stone-600 cursor-pointer">
-                  <input type="checkbox" checked={editingDish.isAvailable} onChange={(e) => setEditingDish({ ...editingDish, isAvailable: e.target.checked })} className="accent-purple-700" />
-                  Available
-                </label>
-              </div>
-            </div>
-            <div className="flex gap-2 mt-4">
-              <button
-                onClick={handleSaveDish}
-                disabled={savingToDb}
-                className="flex-1 py-2 bg-purple-900 text-white rounded-xl font-bold disabled:opacity-60"
-              >
-                {savingToDb ? 'Saving...' : 'Save to Database'}
-              </button>
-              <button onClick={() => setEditingDish(null)} className="px-3 py-2 bg-stone-100 rounded-xl font-bold text-stone-600">
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* INVOICE MODAL (WITH DOWNLOAD ACTION) */}
       {latestCompletedOrder && (
@@ -1392,9 +769,15 @@ function App() {
             <div className="space-y-1 text-right mb-4">
               <div>Subtotal: ₹{latestCompletedOrder.subtotal}</div>
               {latestCompletedOrder.discountAmount > 0 && <div className="text-emerald-700">Discount: -₹{latestCompletedOrder.discountAmount}</div>}
-              <div>GST (5%): ₹{latestCompletedOrder.gstAmount}</div>
+              {latestCompletedOrder.gstAmount > 0 && (
+                latestCompletedOrder.igst > 0
+                  ? <div>IGST: ₹{latestCompletedOrder.igst}</div>
+                  : <><div>CGST: ₹{latestCompletedOrder.cgst || 0}</div><div>SGST: ₹{latestCompletedOrder.sgst || 0}</div></>
+              )}
+              <div>Delivery: {latestCompletedOrder.deliveryFee === 0 ? 'FREE' : `₹${latestCompletedOrder.deliveryFee}`}</div>
               <div className="text-base font-black text-stone-900">Total: ₹{latestCompletedOrder.grandTotal}</div>
-              <div className="text-[10px] text-stone-400">Payment: {latestCompletedOrder.paymentMethod}</div>
+              <div className="text-[10px] text-stone-400">Payment: {latestCompletedOrder.paymentMethod} · {latestCompletedOrder.paymentStatus || 'Pending'}</div>
+              <div className="text-[10px] text-stone-400">Status: {latestCompletedOrder.status}</div>
             </div>
 
             <div className="flex gap-2">
@@ -1415,8 +798,6 @@ function App() {
       {/* RESPONSIVE AUTH MODAL */}
       {showAuthModal && (
         <AuthScreen
-          authMode={authMode}
-          setAuthMode={setAuthMode}
           authAction={authAction}
           setAuthAction={setAuthAction}
           inputUser={inputUser}
@@ -1433,6 +814,7 @@ function App() {
           setRememberMe={setRememberMe}
           onClose={() => setShowAuthModal(false)}
           onSubmit={handleAuthSubmit}
+          onStaffPortal={() => { setShowAuthModal(false); navigate('/admin/login'); }}
         />
       )}
     </div>

@@ -326,9 +326,6 @@ begin
       || case when v_i > 0 then ', ' else '' end
       || v_name || ' (x' || v_qty || ')';
     v_i := v_i + 1;
-
-    insert into public.order_items (order_id, menu_id, name, quantity, price)
-    values (p_order_id, v_menu_id, v_name, v_qty, round(v_price, 2));
   end loop;
 
   v_gst      := round(v_subtotal * 0.05, 2);
@@ -346,6 +343,22 @@ begin
     v_delivery, v_total, coalesce(p_payment_method, 'Cash on Delivery (COD)'),
     'Order Received'
   );
+
+  for v_iter in select * from jsonb_array_elements(p_items)
+  loop
+    v_qty := coalesce((v_iter->>'quantity')::int, 0);
+    v_menu_id := nullif(v_iter->>'menu_id', 'null');
+    if v_menu_id is not null then
+      select name, price into v_name, v_price
+        from public.menu_items
+        where id = v_menu_id and is_available = true;
+    else
+      v_name  := coalesce(nullif(v_iter->>'name', ''), 'Item');
+      v_price := greatest(0, coalesce((v_iter->>'price')::numeric, 0));
+    end if;
+    insert into public.order_items (order_id, menu_id, name, quantity, price)
+    values (p_order_id, v_menu_id, v_name, v_qty, round(v_price, 2));
+  end loop;
 
   return jsonb_build_object(
     'order_id', p_order_id,

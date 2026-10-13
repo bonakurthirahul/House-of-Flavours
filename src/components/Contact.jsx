@@ -1,13 +1,16 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { siteConfig } from '../config.js';
-import { SHEETDB_URL } from '../constants.js';
+import { isSupabaseConfigured } from '../lib/supabase.js';
+import { submitContactMessage } from '../lib/dbService.js';
 import { Reveal } from './Reveal.jsx';
-import { Phone, Mail, MapPin, Clock, MessageCircle } from './icons.jsx';
+import { Phone, Mail, MapPin, Clock, ArrowRight } from './icons.jsx';
 
 export function Contact() {
-  const [form, setForm] = useState({ name: '', phone: '', email: '', message: '' });
+  const [form, setForm] = useState({ name: '', phone: '', email: '', message: '', company: '' });
   const [status, setStatus] = useState('idle'); // 'idle' | 'sending' | 'success' | 'error'
   const [errorMsg, setErrorMsg] = useState('');
+  // Basic spam guards: hidden honeypot field + minimum time-on-form.
+  const mountedAt = useRef(Date.now());
 
   const update = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
 
@@ -20,38 +23,31 @@ export function Contact() {
     const email = form.email.trim();
     const message = form.message.trim();
 
+    // Honeypot filled or submitted implausibly fast -> silently treat as spam.
+    if (form.company.trim() || Date.now() - mountedAt.current < 1500) {
+      setStatus('success');
+      return;
+    }
     if (!name || !message || (!phone && !email)) {
       setStatus('error');
       setErrorMsg('Please enter your name, a phone or email, and a message.');
       return;
     }
+    if (!isSupabaseConfigured) {
+      setStatus('error');
+      setErrorMsg('Messages are temporarily unavailable. Please call us directly.');
+      return;
+    }
 
     setStatus('sending');
     try {
-      const res = await fetch(SHEETDB_URL, {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          data: [{
-            order_id: `CONTACT-${Date.now().toString().slice(-5)}`,
-            timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
-            customer_name: name,
-            phone: phone || email,
-            address: 'Contact Form',
-            items: message,
-            total: 0,
-            payment_mode: 'CONTACT',
-            instructions: email ? `Email: ${email}` : 'None'
-          }]
-        })
-      });
-
-      if (!res.ok) throw new Error('Request failed');
+      await submitContactMessage({ name, phone, email, message });
       setStatus('success');
-      setForm({ name: '', phone: '', email: '', message: '' });
+      setForm({ name: '', phone: '', email: '', message: '', company: '' });
+      mountedAt.current = Date.now();
     } catch (err) {
       setStatus('error');
-      setErrorMsg('Sorry, your message could not be sent. Please try again or call us directly.');
+      setErrorMsg(err.message || 'Sorry, your message could not be sent. Please try again or call us directly.');
     }
   };
 
@@ -118,6 +114,16 @@ export function Contact() {
           {/* Contact form */}
           <Reveal delay={120}>
             <form onSubmit={handleSubmit} className="glass rounded-3xl p-6 sm:p-8 space-y-4">
+              <input
+                type="text"
+                tabIndex={-1}
+                autoComplete="off"
+                aria-hidden="true"
+                value={form.company}
+                onChange={update('company')}
+                className="hidden"
+                name="company"
+              />
               <div>
                 <label className="text-[11px] font-bold text-cream-300 block mb-1.5">Name *</label>
                 <input type="text" value={form.name} onChange={update('name')} placeholder="Your name" className={inputClass} />
@@ -153,7 +159,7 @@ export function Contact() {
                 disabled={status === 'sending'}
                 className="w-full py-3.5 rounded-full bg-gradient-to-r from-gold-300 via-gold-500 to-gold-400 text-night-950 font-bold text-sm hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60 flex items-center justify-center gap-2"
               >
-                <MessageCircle className="w-4 h-4" />
+                <ArrowRight className="w-4 h-4" />
                 {status === 'sending' ? 'Sending...' : 'Send Message'}
               </button>
             </form>

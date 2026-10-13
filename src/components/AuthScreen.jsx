@@ -1,11 +1,10 @@
 import { useState } from 'react';
 import { siteConfig } from '../config.js';
+import { requestPasswordReset } from '../lib/authService.js';
 import { BrandLogo } from './BrandLogo.jsx';
-import { UserIcon, Lock, Eye, EyeOff, ShieldCheck, Check, ArrowRight, MessageCircle, Sparkle } from './icons.jsx';
+import { UserIcon, Lock, Eye, EyeOff, ShieldCheck, Check, ArrowRight, MessageCircle, Sparkle, Mail } from './icons.jsx';
 
 export function AuthScreen({
-  authMode,
-  setAuthMode,
   authAction,
   setAuthAction,
   inputUser,
@@ -21,27 +20,51 @@ export function AuthScreen({
   rememberMe,
   setRememberMe,
   onClose,
-  onSubmit
+  onSubmit,
+  onStaffPortal
 }) {
   const [showPass, setShowPass] = useState(false);
-  const isStaff = authMode === 'staff';
-  const isRegister = !isStaff && authAction === 'register';
+  const isRegister = authAction === 'register';
 
-  const title = isStaff
-    ? 'Kitchen Portal'
-    : isRegister
-      ? 'Create Your Account'
-      : 'Welcome Back';
+  // Forgot-password (Supabase email reset) sub-flow.
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotStatus, setForgotStatus] = useState('idle'); // idle | sending | sent | error
+  const [forgotMsg, setForgotMsg] = useState('');
 
-  const subtitle = isStaff
-    ? 'Authorised staff access only.'
+  const title = forgotOpen ? 'Reset Password' : isRegister ? 'Create Your Account' : 'Welcome Back';
+  const subtitle = forgotOpen
+    ? 'We will email you a secure link to set a new password.'
     : isRegister
       ? 'Join House of Flavours for faster checkout.'
       : 'Sign in to continue your flavour journey.';
 
-  const forgotHref = `https://wa.me/${siteConfig.whatsapp}?text=${encodeURIComponent(
-    'Hi House of Flavours, I need help resetting my account password.'
-  )}`;
+  const handleForgotSubmit = async (e) => {
+    e.preventDefault();
+    setForgotMsg('');
+    if (!forgotEmail.trim()) {
+      setForgotStatus('error');
+      setForgotMsg('Enter the email address registered to your account.');
+      return;
+    }
+    setForgotStatus('sending');
+    const res = await requestPasswordReset(forgotEmail);
+    if (!res.ok) {
+      setForgotStatus('error');
+      setForgotMsg(res.error);
+      return;
+    }
+    // Neutral success: never confirm whether an account exists.
+    setForgotStatus('sent');
+    setForgotMsg('If that address is registered, a password reset email is on its way. Check your inbox and spam folder.');
+  };
+
+  const closeForgot = () => {
+    setForgotOpen(false);
+    setForgotStatus('idle');
+    setForgotMsg('');
+    setForgotEmail('');
+  };
 
   return (
     <div className="fixed inset-0 z-[60] flex items-stretch sm:items-center justify-center bg-night-950/85 backdrop-blur-xl p-0 sm:p-4">
@@ -114,27 +137,9 @@ export function AuthScreen({
             <h3 className="font-display text-2xl sm:text-3xl font-bold text-cream-100">{title}</h3>
             <p className="mt-1.5 text-xs sm:text-sm text-cream-400">{subtitle}</p>
 
-            {/* Role switcher */}
-            <div className="mt-6 flex p-1 bg-night-850 border border-gold-500/10 rounded-2xl text-xs font-bold">
-              <button
-                type="button"
-                onClick={() => { setAuthMode('customer'); }}
-                className={`flex-1 py-2 rounded-xl transition ${!isStaff ? 'bg-gradient-to-r from-gold-300 to-gold-500 text-night-950 shadow-md' : 'text-cream-400 hover:text-cream-200'}`}
-              >
-                Customer
-              </button>
-              <button
-                type="button"
-                onClick={() => { setAuthMode('staff'); setAuthAction('login'); }}
-                className={`flex-1 py-2 rounded-xl transition flex items-center justify-center gap-1.5 ${isStaff ? 'bg-burgundy-600 text-cream-100 shadow-md' : 'text-cream-400 hover:text-cream-200'}`}
-              >
-                <ShieldCheck className="w-3.5 h-3.5" /> Staff
-              </button>
-            </div>
-
-            {/* Sub tabs (customers) */}
-            {!isStaff && (
-              <div className="mt-5 flex gap-6 text-sm border-b border-gold-500/10">
+            {/* Sub tabs */}
+            {!forgotOpen && (
+              <div className="mt-6 flex gap-6 text-sm border-b border-gold-500/10">
                 <button
                   type="button"
                   onClick={() => setAuthAction('login')}
@@ -152,6 +157,43 @@ export function AuthScreen({
               </div>
             )}
 
+            {forgotOpen ? (
+              <form onSubmit={handleForgotSubmit} className="mt-6 space-y-4 text-sm">
+                <div>
+                  <label className="text-[11px] font-bold text-cream-300 block mb-1.5">Registered email</label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-cream-500 absolute left-4 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="email"
+                      value={forgotEmail}
+                      onChange={(e) => setForgotEmail(e.target.value)}
+                      className="w-full pl-11 pr-4 py-3 bg-night-850 border border-gold-500/15 rounded-xl outline-none text-cream-100 placeholder:text-cream-500 focus:border-gold-500/50 transition"
+                      placeholder="you@example.com"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {forgotMsg && (
+                  <div className={`p-3 rounded-xl border text-[11px] font-semibold ${forgotStatus === 'error' ? 'bg-burgundy-600/20 border-burgundy-400/40 text-burgundy-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'}`}>
+                    {forgotMsg}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={forgotStatus === 'sending'}
+                  className="w-full py-3.5 rounded-full font-bold text-sm transition flex items-center justify-center gap-2 disabled:opacity-60 active:scale-[0.99] bg-gradient-to-r from-gold-300 via-gold-500 to-gold-400 text-night-950 hover:brightness-110"
+                >
+                  {forgotStatus === 'sending' ? 'Sending…' : 'Send reset link'}
+                  {forgotStatus !== 'sending' && <ArrowRight className="w-4 h-4" />}
+                </button>
+
+                <button type="button" onClick={closeForgot} className="w-full text-center text-xs font-bold text-gold-300 hover:text-gold-200 transition">
+                  Back to sign in
+                </button>
+              </form>
+            ) : (
             <form onSubmit={onSubmit} className="mt-6 space-y-4 text-sm">
               {isRegister && (
                 <>
@@ -170,7 +212,7 @@ export function AuthScreen({
                     </div>
                   </div>
                   <div>
-                    <label className="text-[11px] font-bold text-cream-300 block mb-1.5">WhatsApp Mobile Number</label>
+                    <label className="text-[11px] font-bold text-cream-300 block mb-1.5">Mobile Number</label>
                     <div className="relative">
                       <MessageCircle className="w-4 h-4 text-cream-500 absolute left-4 top-1/2 -translate-y-1/2" />
                       <input
@@ -224,7 +266,7 @@ export function AuthScreen({
                 </div>
               </div>
 
-              {!isStaff && !isRegister && (
+              {!isRegister && (
                 <div className="flex items-center justify-between text-xs">
                   <label className="flex items-center gap-2 text-cream-300 cursor-pointer select-none">
                     <input
@@ -235,9 +277,9 @@ export function AuthScreen({
                     />
                     Remember me
                   </label>
-                  <a href={forgotHref} target="_blank" rel="noreferrer" className="font-semibold text-gold-300 hover:text-gold-200 transition">
+                  <button type="button" onClick={() => setForgotOpen(true)} className="font-semibold text-gold-300 hover:text-gold-200 transition">
                     Forgot password?
-                  </a>
+                  </button>
                 </div>
               )}
 
@@ -250,24 +292,15 @@ export function AuthScreen({
               <button
                 type="submit"
                 disabled={isAuthenticating}
-                className={`w-full py-3.5 rounded-full font-bold text-sm transition flex items-center justify-center gap-2 disabled:opacity-60 active:scale-[0.99] ${
-                  isStaff
-                    ? 'bg-burgundy-600 hover:bg-burgundy-500 text-cream-100'
-                    : 'bg-gradient-to-r from-gold-300 via-gold-500 to-gold-400 text-night-950 hover:brightness-110'
-                }`}
+                className="w-full py-3.5 rounded-full font-bold text-sm transition flex items-center justify-center gap-2 disabled:opacity-60 active:scale-[0.99] bg-gradient-to-r from-gold-300 via-gold-500 to-gold-400 text-night-950 hover:brightness-110"
               >
-                {isAuthenticating
-                  ? 'Processing...'
-                  : isStaff
-                    ? 'Authenticate Staff'
-                    : isRegister
-                      ? 'Create Account'
-                      : 'Sign In'}
+                {isAuthenticating ? 'Processing...' : isRegister ? 'Create Account' : 'Sign In'}
                 {!isAuthenticating && <ArrowRight className="w-4 h-4" />}
               </button>
             </form>
+            )}
 
-            {!isStaff && (
+            {!forgotOpen && (
               <p className="mt-5 text-center text-xs text-cream-400">
                 {isRegister ? 'Already have an account?' : 'New to House of Flavours?'}{' '}
                 <button
@@ -280,11 +313,15 @@ export function AuthScreen({
               </p>
             )}
 
-            {isStaff && (
-              <p className="mt-5 text-center text-[11px] text-cream-500">
-                Staff accounts are managed by the kitchen administrator.
-              </p>
-            )}
+            <div className="mt-6 pt-5 border-t border-gold-500/10 text-center">
+              <button
+                type="button"
+                onClick={onStaffPortal}
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-cream-500 hover:text-gold-300 transition"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" /> Staff sign in
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -3,24 +3,26 @@ import { supabase } from './supabase.js';
 // Database access through the Supabase client.
 // Every read/write is subject to Row Level Security on the server; the browser
 // only ever holds the publishable key. Staff-only operations are additionally
-// gated server-side by the is_staff() checks inside security-definer functions.
+// gated server-side by is_staff()/current_user_role() checks inside
+// security-definer functions and staff-only RLS policies.
 
 const TABLE_MISSING_CODE = 'PGRST205';
 
 const friendlyError = (err) => {
   const code = err?.code || '';
   if (code === TABLE_MISSING_CODE) {
-    return 'Database schema is not set up yet. Ask an admin to run the Supabase migration (supabase/migrations/001_initial_schema.sql).';
+    return 'Database schema is not set up yet. Ask an admin to run the Supabase migrations (supabase/migrations).';
   }
   if (code === '42501') return 'Permission denied by database security policies.';
   if (/network|fetch|Failed to fetch/i.test(err?.message || '')) {
     return 'Network error reaching the database.';
   }
+  if (code === 'P0001') return err?.message || 'Database operation rejected.';
   return err?.message || 'Database operation failed.';
 };
 
 // Map DB row -> the dish shape used across the app.
-const rowToDish = (r) => ({
+export const rowToDish = (r) => ({
   id: r.id,
   name: r.name,
   description: r.description || '',
@@ -28,12 +30,13 @@ const rowToDish = (r) => ({
   image: r.image || '/placeholder.svg',
   category: r.category,
   isVeg: Boolean(r.is_veg),
-  isAvailable: r.is_available !== false
+  isAvailable: r.is_available !== false,
+  sort_order: r.sort_order || 0
 });
 
 const dishToRow = (d) => ({
   id: d.id,
-  name: d.name,
+  name: (d.name || '').trim(),
   description: d.description || '',
   price: Number(d.price || 0),
   image: d.image || '',
@@ -68,8 +71,11 @@ export async function syncCatalogToDb(categories, items) {
   if (error) throw new Error(friendlyError(error));
 }
 
+// ------------------------------------------------------------------
+// Menu item CRUD (staff). RLS (003) restricts these to authorized staff.
+// ------------------------------------------------------------------
 export async function upsertMenuItem(dish) {
-  const { error } = await supabase.from('menu_items').upsert(dishToRow(dish)).eq('id', dish.id);
+  const { error } = await supabase.from('menu_items').upsert(dishToRow(dish));
   if (error) throw new Error(friendlyError(error));
 }
 
@@ -81,15 +87,77 @@ export async function setAvailability(id, isAvailable) {
   if (error) throw new Error(friendlyError(error));
 }
 
-// Staff-only: full order list with line items.
-export async function loadOrdersFromDb() {
+// Soft delete: deactivate so historical order_items keep valid references.
+export async function deactivateMenuItem(id) {
+  return setAvailability(id, false);
+}
+
+// Hard delete (manager-only policy). Fails safely if the item is referenced.
+export async function deleteMenuItem(id) {
+  const { error } = await supabase.from('menu_items').delete().eq('id', id);
+  if (error) throw new Error(friendlyError(error));
+}
+
+// ------------------------------------------------------------------
+// Categories
+// ------------------------------------------------------------------
+export async function loadCategories() {
+  const { data, error } = await supabase.from('categories').select('*').order('sort_order', { ascending: true });
+  if (error) throw new Error(friendlyError(error));
+  return data || [];
+}
+
+export async function createCategory({ name, description = '', sort_order = 0 }) {
+  const { data, error } = await supabase
+    .from('categories')
+    .insert({ name: name.trim(), description, sort_order: Number(sort_order) || 0 })
+    .select()
+    .single();
+  if (error) throw new Error(friendlyError(error));
+  return data;
+}
+
+export async function updateCategory(id, patch) {
+  const { data, error } = await supabase.from('categories').update(patch).eq('id', id).select().single();
+  if (error) throw new Error(friendlyError(error));
+  return data;
+}
+
+export async function deleteCategory(id) {
+  const { error } = await supabase.from('categories').delete().eq('id', id);
+  if (error) throw new Error(friendlyError(error));
+}
+
+// Count menu items per category name (used to guard category deletion).
+export async function countMenuItemsByCategory() {
+  const { data, error } = await supabase.from('menu_items').select('category');
+  if (error) throw new Error(friendlyError(error));
+  const counts = {};
+  (data || []).forEach((r) => {
+    counts[r.category] = (counts[r.category] || 0) + 1;
+  });
+  return counts;
+}
+
+// ------------------------------------------------------------------
+// Orders
+// ------------------------------------------------------------------
+// Staff-only in practice: RLS returns everything for staff, and only the
+// caller's own rows for an authenticated customer.
+export async function loadOrdersFromDb({ limit = 500 } = {}) {
   const { data, error } = await supabase
     .from('orders')
     .select('*, order_items(*)')
     .order('created_at', { ascending: false })
-    .limit(500);
+    .limit(limit);
   if (error) throw new Error(friendlyError(error));
   return data || [];
+}
+
+export async function adminOrderStats() {
+  const { data, error } = await supabase.rpc('admin_order_stats');
+  if (error) throw new Error(friendlyError(error));
+  return data || null;
 }
 
 // Customer / guest order placement. Totals are recomputed server-side from
@@ -122,4 +190,99 @@ export async function updateOrderStatus(orderId, status) {
   });
   if (error) throw new Error(friendlyError(error));
   return data;
+}
+
+// Staff-only permanent deletion of a Delivered/Cancelled order. The database
+// re-checks authorization and the live status inside a transaction; the UI
+// button is only a convenience, never the security boundary.
+export async function deleteOrder(orderId) {
+  const { error } = await supabase.rpc('delete_order', { p_order_id: orderId });
+  if (error) throw new Error(friendlyError(error));
+}
+
+// ------------------------------------------------------------------
+// Contact inbox (migration 006). Public submit is via a validated RPC; only
+// staff can read/manage the stored messages (enforced by RLS server-side).
+// ------------------------------------------------------------------
+export async function submitContactMessage({ name, phone, email, message }) {
+  const { data, error } = await supabase.rpc('submit_contact_message', {
+    p_name: name,
+    p_phone: phone || '',
+    p_email: email || '',
+    p_message: message
+  });
+  if (error) throw new Error(friendlyError(error));
+  return data;
+}
+
+export async function loadContactMessages({ limit = 200 } = {}) {
+  const { data, error } = await supabase
+    .from('contact_messages')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(friendlyError(error));
+  return data || [];
+}
+
+export async function setContactMessageRead(id, isRead) {
+  const { error } = await supabase
+    .from('contact_messages')
+    .update({ is_read: Boolean(isRead), read_at: isRead ? new Date().toISOString() : null })
+    .eq('id', id);
+  if (error) throw new Error(friendlyError(error));
+}
+
+export async function deleteContactMessage(id) {
+  const { error } = await supabase.from('contact_messages').delete().eq('id', id);
+  if (error) throw new Error(friendlyError(error));
+}
+
+// ------------------------------------------------------------------
+// Settings (staff read via RLS; public keys via get_public_settings()).
+// ------------------------------------------------------------------
+export async function getPublicSettings() {
+  try {
+    const { data, error } = await supabase.rpc('get_public_settings');
+    if (error) throw error;
+    return data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function adminLoadSettings() {
+  const { data, error } = await supabase.from('app_settings').select('*');
+  if (error) throw new Error(friendlyError(error));
+  return data || [];
+}
+
+export async function adminSetSetting(key, value) {
+  const { error } = await supabase.rpc('admin_set_setting', { p_key: key, p_value: String(value) });
+  if (error) throw new Error(friendlyError(error));
+}
+
+// ------------------------------------------------------------------
+// Realtime: subscribe to order changes (RLS still applies to the payload, so a
+// customer only receives their own rows; staff receive all). Returns an
+// unsubscribe function. Callers MUST clean it up.
+// ------------------------------------------------------------------
+export function subscribeToOrders(onChange, { channelName = 'staff-orders' } = {}) {
+  const channel = supabase
+    .channel(channelName)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+      try {
+        onChange(payload);
+      } catch {
+        /* ignore handler errors so the channel stays healthy */
+      }
+    })
+    .subscribe();
+  return () => {
+    try {
+      supabase.removeChannel(channel);
+    } catch {
+      /* noop */
+    }
+  };
 }
