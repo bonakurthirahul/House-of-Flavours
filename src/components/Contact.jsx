@@ -2,10 +2,12 @@ import { useRef, useState } from 'react';
 import { siteConfig } from '../config.js';
 import { isSupabaseConfigured } from '../lib/supabase.js';
 import { submitContactMessage } from '../lib/dbService.js';
+import { useSiteSettings } from '../hooks/useSiteSettings.js';
 import { Reveal } from './Reveal.jsx';
 import { Phone, Mail, MapPin, Clock, ArrowRight } from './icons.jsx';
 
 export function Contact() {
+  const settings = useSiteSettings();
   const [form, setForm] = useState({ name: '', phone: '', email: '', message: '', company: '' });
   const [status, setStatus] = useState('idle'); // 'idle' | 'sending' | 'success' | 'error'
   const [errorMsg, setErrorMsg] = useState('');
@@ -53,11 +55,12 @@ export function Contact() {
 
   const socialEntries = Object.entries(siteConfig.social || {}).filter(([, url]) => url);
 
+  const phone = settings.phone || siteConfig.phone;
   const INFO = [
-    { label: 'Phone', value: siteConfig.phone, href: `tel:${siteConfig.phone.replace(/\s/g, '')}`, Icon: Phone },
-    { label: 'Email', value: siteConfig.email, Icon: Mail },
-    { label: 'Address / Service Area', value: siteConfig.address, Icon: MapPin },
-    { label: 'Opening Hours', value: siteConfig.hours, Icon: Clock }
+    { label: 'Phone', value: phone, href: `tel:${phone.replace(/\s/g, '')}`, Icon: Phone },
+    { label: 'Email', value: settings.email || siteConfig.email, Icon: Mail },
+    { label: 'Address / Service Area', value: settings.address || siteConfig.address, Icon: MapPin },
+    { label: 'Opening Hours', value: settings.hours || siteConfig.hours, Icon: Clock }
   ];
 
   const inputClass =

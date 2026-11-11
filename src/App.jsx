@@ -1,16 +1,16 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { UPI_ID, INITIAL_COUPONS } from './constants.js';
+import { INITIAL_COUPONS } from './constants.js';
 import { COMPLETE_DEFAULT_CATALOG, QUICK_UPSELL_ITEMS, mergeMenuSeed } from './data/catalog.js';
-import { siteConfig } from './config.js';
 import { useLocalStorage } from './hooks/useLocalStorage.js';
 import { isSupabaseConfigured } from './lib/supabase.js';
 import { registerCustomer, loginCustomer, logout as supabaseLogout, restoreSession, onSupabaseAuthChange } from './lib/authService.js';
 import { isSchemaReady, loadMenuFromDb, loadOrdersFromDb, placeOrderToDb, getPublicSettings, subscribeToOrders } from './lib/dbService.js';
-import { computeOrderTotals, normalizeSettings, DEFAULT_PRICING_SETTINGS } from './lib/pricing.js';
+import { computeOrderTotals, normalizeSettings, normalizeSiteInfo, DEFAULT_PRICING_SETTINGS } from './lib/pricing.js';
 import { navigate } from './lib/router.js';
-import { Plus, Minus, Download, ShoppingBag } from './components/icons.jsx';
+import { siteConfig } from './config.js';
+import { SiteSettingsContext } from './hooks/useSiteSettings.js';
+import { Plus, Minus, ShoppingBag } from './components/icons.jsx';
 import { OrdersView } from './components/OrdersView.jsx';
-import { BrandLogo } from './components/BrandLogo.jsx';
 import { Navbar } from './components/Navbar.jsx';
 import { Hero } from './components/Hero.jsx';
 import { About } from './components/About.jsx';
@@ -19,6 +19,7 @@ import { Reviews } from './components/Reviews.jsx';
 import { Contact } from './components/Contact.jsx';
 import { Footer } from './components/Footer.jsx';
 import { AuthScreen } from './components/AuthScreen.jsx';
+import { InvoiceModal } from './components/Invoice.jsx';
 
 function App() {
   const [activeTab, setActiveTab] = useState('home');
@@ -44,7 +45,8 @@ function App() {
   const [checkoutPhone, setCheckoutPhone] = useState('');
   const [checkoutAddress, setCheckoutAddress] = useState('');
   const [cookingInstructions, setCookingInstructions] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState('UPI Instant (9948099296@fam)');
+  // Canonical methods ('UPI' | 'COD'); friendly labels are rendered from settings.
+  const [paymentMethod, setPaymentMethod] = useState('UPI');
   const [latestCompletedOrder, setLatestCompletedOrder] = useState(null);
 
   // Clean Auth Modal States
@@ -68,6 +70,11 @@ function App() {
   // Configurable pricing (GST + delivery) — loaded from the database settings so
   // the storefront shows exactly what public.place_order() will enforce.
   const [pricingSettings, setPricingSettings] = useState(DEFAULT_PRICING_SETTINGS);
+
+  // Editable restaurant info (name, phone, logo, UPI id, payment methods).
+  // Falls back to the confirmed values in src/config.js when the database
+  // is unavailable or a setting has not been saved yet.
+  const [siteInfo, setSiteInfo] = useState(() => normalizeSiteInfo({}, siteConfig));
 
   // Prevent duplicate checkout submissions (double-click / retry while saving).
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
@@ -135,13 +142,17 @@ function App() {
     return () => { active = false; };
   }, []);
 
-  // Load the configurable GST / delivery settings (public keys only). When the
-  // database is unavailable the safe local defaults (no GST, flat fee) are used.
+  // Load the configurable GST / delivery settings and editable site info
+  // (public keys only). When the database is unavailable the safe local
+  // defaults (config.js values, no GST, flat fee) are used.
   useEffect(() => {
     if (!isSupabaseConfigured || !supabaseReady) return;
     let active = true;
     getPublicSettings().then((raw) => {
-      if (active && raw) setPricingSettings(normalizeSettings(raw));
+      if (active && raw) {
+        setPricingSettings(normalizeSettings(raw));
+        setSiteInfo(normalizeSiteInfo(raw, siteConfig));
+      }
     });
     return () => { active = false; };
   }, [supabaseReady]);
@@ -309,6 +320,33 @@ function App() {
   const { deliveryFee, gstAmount, grandTotal } = totals;
   const totalCartCount = useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
+  // Resolve the selected method against the owner-configured list (falls
+  // back to the first configured method, so a stale choice can't persist).
+  const activePaymentMethod = useMemo(
+    () => (siteInfo.paymentMethods.includes(paymentMethod) ? paymentMethod : siteInfo.paymentMethods[0]),
+    [paymentMethod, siteInfo.paymentMethods]
+  );
+  const isUpiPayment = /^upi/i.test(activePaymentMethod);
+
+  // Collision-resistant human-readable order id (32^5 ≈ 33M combinations;
+  // the database unique constraint is the final guard).
+  const generateOrderId = () => {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const rand = Array.from({ length: 5 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('');
+    return `RF-${rand}`;
+  };
+
+  // Everything the invoice template needs (editable site info + tax context).
+  const invoiceInfo = useMemo(
+    () => ({
+      ...siteInfo,
+      gstRegistered: pricingSettings.gstRegistered,
+      gstin: pricingSettings.gstin,
+      gstRate: pricingSettings.gstRate
+    }),
+    [siteInfo, pricingSettings]
+  );
+
   const handleApplyCoupon = (e) => {
     e.preventDefault();
     setCouponError('');
@@ -352,7 +390,7 @@ function App() {
     }
 
     setIsPlacingOrder(true);
-    const orderId = `RF-${Date.now().toString().slice(-5)}`;
+    const orderId = generateOrderId();
     const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
     try {
       const placed = await placeOrderToDb({
@@ -361,11 +399,14 @@ function App() {
         phone: checkoutPhone.trim(),
         address: checkoutAddress,
         instructions: cookingInstructions,
-        paymentMethod,
+        paymentMethod: activePaymentMethod,
         discount: discountAmount,
+        // The coupon code is re-validated server-side against public.coupons;
+        // the browser-submitted discount amount is never trusted.
+        couponCode: appliedCoupon ? appliedCoupon.code : null,
         items: cart.map((i) => ({
           ...i,
-          // Only genuine DB menu items carry a menu_id; extras are priced client-side (clamped in DB).
+          // Only genuine DB menu items carry a menu_id; extras are priced server-side.
           menuId: menuItems.some((d) => d.id === i.id) ? i.id : null
         }))
       });
@@ -378,6 +419,7 @@ function App() {
         items: [...cart],
         subtotal: Number(placed.subtotal),
         discountAmount: Number(placed.discount),
+        couponCode: placed.coupon_code || appliedCoupon?.code || null,
         gstAmount: Number(placed.gst),
         cgst: Number(placed.cgst || 0),
         sgst: Number(placed.sgst || 0),
@@ -388,7 +430,7 @@ function App() {
         deliveryRatePerKm: placed.delivery_rate_per_km == null ? null : Number(placed.delivery_rate_per_km),
         paymentStatus: placed.payment_status || 'Pending',
         grandTotal: Number(placed.total),
-        paymentMethod,
+        paymentMethod: placed.payment_method || activePaymentMethod,
         status: 'Order Received',
         source: 'supabase'
       };
@@ -403,75 +445,9 @@ function App() {
     }
   };
 
-  // Download Invoice Action (HTML/PDF format)
-  const downloadInvoiceFile = (order) => {
-    const invoiceContent = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Invoice #${order.orderId} - House of Flavours</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 30px; max-width: 600px; margin: 0 auto; color: #1c1917; }
-    .header { text-align: center; border-bottom: 2px solid #f59e0b; padding-bottom: 20px; }
-    .title { font-size: 24px; font-weight: 900; color: #b45309; margin: 0; }
-    .meta { font-size: 13px; color: #78716c; margin-top: 5px; }
-    .details { margin: 20px 0; font-size: 14px; line-height: 1.6; }
-    table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
-    th { text-align: left; padding: 10px; background: #f5f5f4; border-bottom: 1px solid #e7e5e4; }
-    td { padding: 10px; border-bottom: 1px solid #f5f5f4; }
-    .total-box { text-align: right; margin-top: 15px; font-size: 14px; }
-    .grand { font-size: 20px; font-weight: 900; color: #b45309; }
-    .footer { text-align: center; margin-top: 30px; font-size: 12px; color: #a8a29e; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1 class="title">HOUSE OF FLAVOURS</h1>
-    <div class="meta">Authentic Hyderabadi Dum Biryani & Kebabs</div>
-    <div class="meta">Tax Invoice / Receipt: #${order.orderId} | ${order.timestamp}</div>
-  </div>
-  <div class="details">
-    <strong>Customer:</strong> ${order.customer?.name}<br>
-    <strong>Phone:</strong> ${order.customer?.phone}<br>
-    <strong>Delivery Address:</strong> ${order.customer?.address}<br>
-    <strong>Payment:</strong> ${order.paymentMethod}${pricingSettings.gstRegistered && pricingSettings.gstin ? `<br><strong>GSTIN:</strong> ${pricingSettings.gstin}` : ''}
-  </div>
-  <table>
-    <thead><tr><th>Item</th><th>Qty</th><th style="text-align:right">Unit</th><th style="text-align:right">Line total</th></tr></thead>
-    <tbody>
-      ${order.items.map(it => `<tr><td>${it.name}</td><td>${it.quantity}</td><td style="text-align:right">₹${it.price}</td><td style="text-align:right">₹${(Number(it.price) * it.quantity).toFixed(2)}</td></tr>`).join('')}
-    </tbody>
-  </table>
-  <div class="total-box">
-    <div>Subtotal: ₹${order.subtotal}</div>
-    ${order.discountAmount > 0 ? `<div style="color: green">Discount: -₹${order.discountAmount}</div>` : ''}
-    ${order.gstAmount > 0 ? (order.igst > 0
-      ? `<div>IGST: ₹${order.igst}</div>`
-      : `<div>CGST: ₹${order.cgst ?? 0}</div><div>SGST: ₹${order.sgst ?? 0}</div>`) : ''}
-    <div>Delivery Fee: ${order.deliveryFee === 0 ? 'FREE' : `₹${order.deliveryFee}`}${order.deliveryDistanceKm != null ? ` (${order.deliveryDistanceKm} km @ ₹${order.deliveryRatePerKm}/km)` : ''}</div>
-    <div class="grand">Grand Total: ₹${order.grandTotal}</div>
-  </div>
-  <div class="details">
-    <strong>Payment method:</strong> ${order.paymentMethod}<br>
-    <strong>Payment status:</strong> ${order.paymentStatus || 'Pending'}<br>
-    <strong>Order status:</strong> ${order.status}
-  </div>
-  <div class="footer">
-    Thank you for ordering with House of Flavours! Queries: ${siteConfig.phone} · ${siteConfig.email} · ${siteConfig.address}
-  </div>
-</body>
-</html>`;
-
-    const blob = new Blob([invoiceContent], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `HouseOfFlavours_Invoice_${order.orderId}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+  // Invoice downloads are handled by InvoiceModal / buildInvoiceHtml
+  // (src/components/Invoice.jsx), which HTML-escapes every user-controlled
+  // value before embedding it in the downloaded document.
 
   const userScopedOrders = useMemo(() => {
     if (!currentUser) return [];
@@ -528,7 +504,8 @@ function App() {
   const menuById = useMemo(() => Object.fromEntries(menuItems.map((d) => [d.id, d])), [menuItems]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-night-950 text-cream-100">
+    <SiteSettingsContext.Provider value={siteInfo}>
+      <div className="min-h-screen flex flex-col bg-night-950 text-cream-100">
 
       {/* Header / Navigation */}
       <Navbar
@@ -665,31 +642,32 @@ function App() {
                 <input type="tel" placeholder="Mobile Number *" value={checkoutPhone} onChange={(e) => setCheckoutPhone(e.target.value)} className="w-full px-3 py-2 border rounded-xl outline-none" />
                 <textarea placeholder="Delivery Address *" value={checkoutAddress} onChange={(e) => setCheckoutAddress(e.target.value)} className="w-full px-3 py-2 border rounded-xl outline-none" rows="2"></textarea>
 
-                {/* Payment Selector */}
+                {/* Payment Selector (owner-configured methods; canonical values stored) */}
                 <div>
                   <label className="font-bold block mb-1">Payment Method</label>
                   <div className="grid grid-cols-2 gap-2">
-                    {['UPI Instant (9948099296@fam)', 'Cash on Delivery (COD)'].map(m => (
+                    {siteInfo.paymentMethods.map(m => (
                       <button
                         key={m}
                         type="button"
                         onClick={() => setPaymentMethod(m)}
-                        className={`py-2 px-1.5 text-[10px] sm:text-[11px] font-bold rounded-xl border ${paymentMethod === m ? 'bg-amber-600 text-white border-amber-600' : 'bg-stone-50 border-stone-200'}`}
+                        className={`py-2 px-1.5 text-[10px] sm:text-[11px] font-bold rounded-xl border ${activePaymentMethod === m ? 'bg-amber-600 text-white border-amber-600' : 'bg-stone-50 border-stone-200'}`}
                       >
-                        {m}
+                        {m === 'UPI' ? (siteInfo.upiId ? `UPI Instant (${siteInfo.upiId})` : 'UPI Instant') : 'Cash on Delivery (COD)'}
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {paymentMethod.startsWith('UPI') && (
+                {isUpiPayment && siteInfo.upiId && (
                   <div className="bg-stone-50 border border-stone-200 p-2.5 rounded-xl text-center space-y-1">
-                    <p className="text-[11px] font-bold text-stone-700">Scan & Pay via UPI: <span className="text-amber-800">{UPI_ID}</span></p>
+                    <p className="text-[11px] font-bold text-stone-700">Scan & Pay via UPI: <span className="text-amber-800">{siteInfo.upiId}</span></p>
                     <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=upi://pay?pa=${UPI_ID}%26pn=HOUSE%20OF%20FLAVOURS%26am=${grandTotal}`}
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=upi://pay?pa=${encodeURIComponent(siteInfo.upiId)}%26pn=${encodeURIComponent(siteInfo.brandName)}%26am=${encodeURIComponent(grandTotal)}`}
                       alt="UPI QR Code"
                       className="w-24 h-24 mx-auto border rounded-lg p-1 bg-white"
                     />
+                    <p className="text-[10px] text-stone-500 leading-snug">Pay {`₹${grandTotal}`} after placing the order. Payment is confirmed by the restaurant once verified.</p>
                   </div>
                 )}
               </div>
@@ -741,61 +719,13 @@ function App() {
       {/* Footer (shown on all views) */}
       <Footer onNavigate={goToSection} />
 
-      {/* INVOICE MODAL (WITH DOWNLOAD ACTION) */}
+      {/* INVOICE MODAL (professional, print-ready, escaped download) */}
       {latestCompletedOrder && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 z-50">
-          <div id="printable-invoice" className="bg-white p-5 sm:p-6 rounded-3xl max-w-md w-full shadow-2xl text-xs max-h-[90vh] overflow-y-auto">
-            <div className="text-center border-b pb-3 mb-3">
-              <div className="flex justify-center mb-1">
-                <BrandLogo className="w-12 h-12" />
-              </div>
-              <h3 className="text-base sm:text-lg font-black text-stone-900">House of Flavours</h3>
-              <p className="text-[11px] text-stone-500">Tax Invoice / Receipt</p>
-              <p className="text-[10px] text-stone-400">Order ID: #{latestCompletedOrder.orderId} • {latestCompletedOrder.timestamp}</p>
-            </div>
-
-            <div className="mb-3 space-y-1">
-              <div><strong>Customer:</strong> {latestCompletedOrder.customer?.name}</div>
-              <div><strong>Phone:</strong> {latestCompletedOrder.customer?.phone}</div>
-              <div><strong>Address:</strong> {latestCompletedOrder.customer?.address}</div>
-            </div>
-
-            <div className="border-y py-2 space-y-1 mb-3">
-              {latestCompletedOrder.items.map((i, idx) => (
-                <div key={idx} className="flex justify-between">
-                  <span>{i.name} x{i.quantity}</span>
-                  <span>₹{i.price * i.quantity}</span>
-                </div>
-              ))}
-            </div>
-
-            <div className="space-y-1 text-right mb-4">
-              <div>Subtotal: ₹{latestCompletedOrder.subtotal}</div>
-              {latestCompletedOrder.discountAmount > 0 && <div className="text-emerald-700">Discount: -₹{latestCompletedOrder.discountAmount}</div>}
-              {latestCompletedOrder.gstAmount > 0 && (
-                latestCompletedOrder.igst > 0
-                  ? <div>IGST: ₹{latestCompletedOrder.igst}</div>
-                  : <><div>CGST: ₹{latestCompletedOrder.cgst || 0}</div><div>SGST: ₹{latestCompletedOrder.sgst || 0}</div></>
-              )}
-              <div>Delivery: {latestCompletedOrder.deliveryFee === 0 ? 'FREE' : `₹${latestCompletedOrder.deliveryFee}`}</div>
-              <div className="text-base font-black text-stone-900">Total: ₹{latestCompletedOrder.grandTotal}</div>
-              <div className="text-[10px] text-stone-400">Payment: {latestCompletedOrder.paymentMethod} · {latestCompletedOrder.paymentStatus || 'Pending'}</div>
-              <div className="text-[10px] text-stone-400">Status: {latestCompletedOrder.status}</div>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => downloadInvoiceFile(latestCompletedOrder)}
-                className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 transition"
-              >
-                <Download className="w-4 h-4" /> Download Invoice
-              </button>
-              <button onClick={() => setLatestCompletedOrder(null)} className="px-4 py-2.5 bg-stone-100 text-stone-700 rounded-xl font-bold">
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
+        <InvoiceModal
+          order={latestCompletedOrder}
+          info={invoiceInfo}
+          onClose={() => setLatestCompletedOrder(null)}
+        />
       )}
 
       {/* RESPONSIVE AUTH MODAL */}
@@ -820,7 +750,8 @@ function App() {
           onStaffPortal={() => { setShowAuthModal(false); navigate('/admin/login'); }}
         />
       )}
-    </div>
+      </div>
+    </SiteSettingsContext.Provider>
   );
 }
 

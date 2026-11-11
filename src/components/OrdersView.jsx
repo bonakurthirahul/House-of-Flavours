@@ -1,4 +1,5 @@
-import { statusMeta, money } from '../lib/pricing.js';
+import { statusMeta, money, paymentStatusMeta, paymentMethodLabel } from '../lib/pricing.js';
+import { useSiteSettings } from '../hooks/useSiteSettings.js';
 import { Download, RefreshCw, ShoppingBag, MapPin } from './icons.jsx';
 
 // Customer-facing order history. Pure presentation: it renders the mapped order
@@ -20,6 +21,15 @@ function StatusBadge({ status }) {
   return (
     <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border ${TONE_BADGE[meta.tone] || TONE_BADGE.neutral}`}>
       {meta.cancelled ? '✕ ' : ''}{meta.label}
+    </span>
+  );
+}
+
+function PaymentBadge({ status }) {
+  const meta = paymentStatusMeta(status);
+  return (
+    <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border ${TONE_BADGE[meta.tone] || TONE_BADGE.neutral}`}>
+      {meta.label}
     </span>
   );
 }
@@ -52,7 +62,7 @@ function Timeline({ status }) {
   );
 }
 
-function OrderCard({ order, menuById, onViewInvoice }) {
+function OrderCard({ order, menuById, onViewInvoice, upiId }) {
   const cancelled = order.status === 'Cancelled';
   return (
     <article className={`bg-white rounded-2xl border p-3.5 sm:p-4 text-xs shadow-sm ${cancelled ? 'border-rose-200' : 'border-stone-200'}`}>
@@ -61,12 +71,13 @@ function OrderCard({ order, menuById, onViewInvoice }) {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-black text-stone-900">#{order.orderId}</span>
             <StatusBadge status={order.status} />
+            <PaymentBadge status={order.paymentStatus} />
           </div>
           <div className="text-[10px] text-stone-400 mt-0.5">{order.timestamp}</div>
         </div>
         <div className="text-right">
           <div className="font-black text-sm text-stone-900">{money(order.grandTotal)}</div>
-          <div className="text-[10px] text-stone-400">{order.paymentMethod} · {order.paymentStatus || 'Pending'}</div>
+          <div className="text-[10px] text-stone-400">{paymentMethodLabel(order.paymentMethod, upiId)}</div>
         </div>
       </div>
 
@@ -117,6 +128,7 @@ function OrderCard({ order, menuById, onViewInvoice }) {
 }
 
 export function OrdersView({ orders = [], currentUser, loading, error, onRefresh, onLogin, onViewInvoice, menuById }) {
+  const settings = useSiteSettings();
   return (
     <main className="flex-1 max-w-2xl w-full mx-auto p-3.5 sm:p-6 bg-stone-100 text-stone-900">
       <div className="flex justify-between items-center mb-3 sm:mb-4 gap-2">
@@ -161,7 +173,7 @@ export function OrdersView({ orders = [], currentUser, loading, error, onRefresh
 
       {!loading && !error && currentUser && orders.length > 0 && (
         <div className="space-y-3">
-          {orders.map((o) => <OrderCard key={o.orderId} order={o} menuById={menuById} onViewInvoice={onViewInvoice} />)}
+          {orders.map((o) => <OrderCard key={o.orderId} order={o} menuById={menuById} onViewInvoice={onViewInvoice} upiId={settings.upiId} />)}
         </div>
       )}
     </main>

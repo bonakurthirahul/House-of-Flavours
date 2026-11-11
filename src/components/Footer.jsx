@@ -1,4 +1,5 @@
 import { siteConfig } from '../config.js';
+import { useSiteSettings } from '../hooks/useSiteSettings.js';
 import { BrandLogo } from './BrandLogo.jsx';
 import { Phone, Mail, MapPin, Clock, ArrowRight } from './icons.jsx';
 
@@ -11,6 +12,11 @@ const NAV_LINKS = [
 ];
 
 export function Footer({ onNavigate }) {
+  const settings = useSiteSettings();
+  const phone = settings.phone || siteConfig.phone;
+  const email = settings.email || siteConfig.email;
+  const address = settings.address || siteConfig.address;
+  const hours = settings.hours || siteConfig.hours;
   const socialEntries = Object.entries(siteConfig.social || {}).filter(([, url]) => url);
 
   return (
@@ -66,16 +72,16 @@ export function Footer({ onNavigate }) {
           <div>
             <h3 className="text-sm font-bold text-cream-100 uppercase tracking-wider">Contact</h3>
             <ul className="mt-4 space-y-3 text-sm text-cream-400">
-              <li className="flex items-start gap-2.5"><Phone className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {siteConfig.phone}</li>
-              <li className="flex items-start gap-2.5"><Mail className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {siteConfig.email}</li>
-              <li className="flex items-start gap-2.5"><MapPin className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {siteConfig.address}</li>
-              <li className="flex items-start gap-2.5"><Clock className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {siteConfig.hours}</li>
+              <li className="flex items-start gap-2.5"><Phone className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {phone}</li>
+              <li className="flex items-start gap-2.5"><Mail className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {email}</li>
+              <li className="flex items-start gap-2.5"><MapPin className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {address}</li>
+              <li className="flex items-start gap-2.5"><Clock className="w-4 h-4 text-gold-400 mt-0.5 shrink-0" /> {hours}</li>
             </ul>
           </div>
         </div>
 
         <div className="mt-12 pt-6 border-t border-gold-500/10 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-cream-500">
-          <span>© {new Date().getFullYear()} {siteConfig.brandName}. All rights reserved.</span>
+          <span>© {new Date().getFullYear()} {settings.brandName}. All rights reserved.</span>
           <span className="flex items-center gap-1.5">Crafted with <span className="text-burgundy-400">♥</span> for flavour lovers</span>
         </div>
       </div>

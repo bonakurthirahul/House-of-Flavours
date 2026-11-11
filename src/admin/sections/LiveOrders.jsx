@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { StatusBadge, Badge, Button, EmptyState, Skeleton } from '../ui.jsx';
+import { StatusBadge, PaymentBadge, Badge, Button, EmptyState, Skeleton } from '../ui.jsx';
 import { RefreshCw } from '../../components/icons.jsx';
 
 const ALL_STATUSES = ['Order Received', 'Preparing', 'Out for Delivery', 'Delivered', 'Cancelled'];
+const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed'];
 
 const money = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
 
-export function LiveOrders({ orders, loading, error, onRefresh, onSetStatus, updatingIds }) {
+export function LiveOrders({ orders, loading, error, onRefresh, onSetStatus, onSetPaymentStatus, updatingIds }) {
   const [expanded, setExpanded] = useState({});
 
   if (loading) {
@@ -73,18 +74,34 @@ export function LiveOrders({ orders, loading, error, onRefresh, onSetStatus, upd
                   <div className="text-right">
                     <div className="text-lg font-bold text-gold-300">{money(o.total)}</div>
                     <div className="text-[10px] text-cream-500">incl. GST {money(o.gst)}</div>
+                    <div className="mt-1"><PaymentBadge status={o.payment_status || 'Pending'} /></div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <label className="sr-only" htmlFor={`status-${o.order_id}`}>Order status</label>
-                    <select
-                      id={`status-${o.order_id}`}
-                      value={o.status}
-                      disabled={updating}
-                      onChange={(e) => onSetStatus(o.order_id, e.target.value)}
-                      className="px-3 py-2 rounded-xl border border-gold-500/20 bg-night-850 text-cream-100 text-xs font-semibold outline-none focus:border-gold-500/50 disabled:opacity-60"
-                    >
-                      {ALL_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
+                    <div>
+                      <label className="sr-only" htmlFor={`payment-${o.order_id}`}>Payment status</label>
+                      <select
+                        id={`payment-${o.order_id}`}
+                        value={o.payment_status || 'Pending'}
+                        disabled={updating || !onSetPaymentStatus}
+                        onChange={(e) => onSetPaymentStatus(o.order_id, e.target.value)}
+                        title="Mark Paid only after verifying the payment in your bank/UPI app"
+                        className="px-3 py-2 rounded-xl border border-gold-500/20 bg-night-850 text-cream-100 text-xs font-semibold outline-none focus:border-gold-500/50 disabled:opacity-60"
+                      >
+                        {PAYMENT_STATUSES.map((s) => <option key={s} value={s}>Payment: {s}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="sr-only" htmlFor={`status-${o.order_id}`}>Order status</label>
+                      <select
+                        id={`status-${o.order_id}`}
+                        value={o.status}
+                        disabled={updating}
+                        onChange={(e) => onSetStatus(o.order_id, e.target.value)}
+                        className="px-3 py-2 rounded-xl border border-gold-500/20 bg-night-850 text-cream-100 text-xs font-semibold outline-none focus:border-gold-500/50 disabled:opacity-60"
+                      >
+                        {ALL_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
                   </div>
                 </div>
               </div>

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ShieldCheck } from '../components/icons.jsx';
+import { paymentStatusMeta } from '../lib/pricing.js';
 
 // ------------------------------------------------------------------
 // Shared admin UI primitives (luxury charcoal / cream / gold system).
@@ -44,6 +45,18 @@ const STATUS_TONES = {
 
 export function StatusBadge({ status }) {
   return <Badge tone={STATUS_TONES[status] || 'neutral'}>{status}</Badge>;
+}
+
+// Payment verification badge (distinct from fulfilment status).
+const PAYMENT_TONES = {
+  Paid: 'green',
+  Failed: 'red',
+  Pending: 'amber'
+};
+
+export function PaymentBadge({ status }) {
+  const meta = paymentStatusMeta(status);
+  return <Badge tone={PAYMENT_TONES[meta.label] || 'neutral'}>Payment: {meta.label}</Badge>;
 }
 
 export function EmptyState({ title, hint, action }) {

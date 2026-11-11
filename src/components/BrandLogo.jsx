@@ -1,15 +1,22 @@
 import { siteConfig } from '../config.js';
+import { useSiteSettings } from '../hooks/useSiteSettings.js';
 
 // Configurable brand logo for the dark premium theme.
-// - If `siteConfig.logoUrl` is set, it renders your logo image.
+// - If an admin-uploaded logo is saved (Settings → Restaurant Logo) it wins.
+// - Otherwise `siteConfig.logoUrl` (build-time default) is used if set.
 // - Otherwise it renders the built-in gold cloche emblem.
 export function BrandLogo({ className = 'w-10 h-10' }) {
-  if (siteConfig.logoUrl) {
+  const settings = useSiteSettings();
+  const logoUrl = settings.logoUrl || siteConfig.logoUrl;
+  const brandName = settings.brandName || siteConfig.brandName;
+
+  if (logoUrl) {
     return (
       <img
-        src={siteConfig.logoUrl}
-        alt={`${siteConfig.brandName} logo`}
+        src={logoUrl}
+        alt={`${brandName} logo`}
         className={`${className} object-contain`}
+        onError={(e) => { e.currentTarget.style.display = 'none'; }}
       />
     );
   }
@@ -21,7 +28,7 @@ export function BrandLogo({ className = 'w-10 h-10' }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       role="img"
-      aria-label={`${siteConfig.brandName} emblem`}
+      aria-label={`${brandName} emblem`}
     >
       <defs>
         <linearGradient id="hofGoldGrad" x1="0" y1="0" x2="1" y2="1">

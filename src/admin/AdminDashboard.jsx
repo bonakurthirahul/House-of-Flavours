@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { BrandLogo } from '../components/BrandLogo.jsx';
 import { ShieldCheck, RefreshCw } from '../components/icons.jsx';
-import { loadOrdersFromDb, updateOrderStatus, deleteOrder, subscribeToOrders } from '../lib/dbService.js';
+import { loadOrdersFromDb, updateOrderStatus, setOrderPaymentStatus, deleteOrder, subscribeToOrders } from '../lib/dbService.js';
 import { Badge, Skeleton, Spinner, useToast } from './ui.jsx';
+import { NotificationsBell } from './NotificationsBell.jsx';
 import { Overview } from './sections/Overview.jsx';
 import { LiveOrders } from './sections/LiveOrders.jsx';
 import { MenuManager } from './sections/MenuManager.jsx';
@@ -97,6 +98,29 @@ export function AdminDashboard({ session }) {
     }
   }, [orders, session.isManager, toast]);
 
+  // Payment verification — staff-only RPC. 'Paid' can ONLY be set here
+  // (after checking the bank/UPI app); optimistic with rollback on error.
+  const setPaymentStatus = useCallback(async (orderId, paymentStatus) => {
+    const current = orders.find((o) => o.order_id === orderId);
+    if (!current || (current.payment_status || 'Pending') === paymentStatus) return;
+    setUpdatingIds((prev) => new Set(prev).add(orderId));
+    const previous = current.payment_status || 'Pending';
+    setOrders((list) => list.map((o) => (o.order_id === orderId ? { ...o, payment_status: paymentStatus } : o)));
+    try {
+      await setOrderPaymentStatus(orderId, paymentStatus);
+      toast.success(`Order #${orderId} payment → ${paymentStatus}.`);
+    } catch (err) {
+      setOrders((list) => list.map((o) => (o.order_id === orderId ? { ...o, payment_status: previous } : o)));
+      toast.error(err.message, 'Could not update payment status');
+    } finally {
+      setUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(orderId);
+        return next;
+      });
+    }
+  }, [orders, toast]);
+
   // Permanent deletion goes through the staff-only delete_order RPC, which
   // re-checks authorization and that the order is Delivered/Cancelled.
   const deleteOrderRow = useCallback(async (orderId) => {
@@ -185,6 +209,10 @@ export function AdminDashboard({ session }) {
                   <RefreshCw className="w-3.5 h-3.5" /> Refresh
                 </button>
               )}
+              <NotificationsBell
+                onOpenOrder={() => setTab('live')}
+                onOrdersChanged={() => loadOrders({ silent: true })}
+              />
               <a
                 href="/"
                 onClick={(e) => { e.preventDefault(); window.history.pushState({}, '', '/'); window.dispatchEvent(new PopStateEvent('popstate')); }}
@@ -221,6 +249,7 @@ export function AdminDashboard({ session }) {
               error={error}
               onRefresh={() => loadOrders()}
               onSetStatus={setStatus}
+              onSetPaymentStatus={setPaymentStatus}
               updatingIds={updatingIds}
             />
           )}

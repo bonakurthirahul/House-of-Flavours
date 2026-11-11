@@ -76,6 +76,62 @@ export function normalizeSettings(raw = {}) {
   };
 }
 
+// ------------------------------------------------------------------
+// Editable site information (Admin → Settings, stored in app_settings
+// and exposed through get_public_settings()). All values are
+// public-safe business info already shown on the website — never a
+// secret. Missing keys fall back to the confirmed values in config.js.
+// ------------------------------------------------------------------
+const cleanStr = (v, fallback = '') => {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s || fallback;
+};
+
+export function normalizeSiteInfo(raw = {}, fallback = {}) {
+  const methodsRaw = cleanStr(raw.payment_methods, 'UPI,COD');
+  const methods = methodsRaw
+    .split(',')
+    .map((m) => m.trim().toUpperCase())
+    .filter((m) => m === 'UPI' || m === 'COD');
+  if (!methods.length) methods.push('UPI', 'COD');
+  return {
+    brandName: cleanStr(raw.restaurant_name, fallback.brandName || 'House of Flavours'),
+    phone: cleanStr(raw.restaurant_phone, fallback.phone || ''),
+    email: cleanStr(raw.restaurant_email, fallback.email || ''),
+    address: cleanStr(raw.restaurant_address, fallback.address || ''),
+    hours: cleanStr(raw.restaurant_hours, fallback.hours || ''),
+    logoUrl: cleanStr(raw.restaurant_logo_url, fallback.logoUrl || ''),
+    upiId: cleanStr(raw.upi_id, fallback.upiId || ''),
+    paymentMethods: methods
+  };
+}
+
+// ------------------------------------------------------------------
+// Payment status (kept separate from order fulfilment status).
+// 'Paid' can only ever be set by staff through the trusted
+// set_order_payment_status() database function — never by the browser.
+// ------------------------------------------------------------------
+export const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed'];
+
+export const PAYMENT_STATUS_META = {
+  Pending: { label: 'Pending', hint: 'Payment not verified yet', tone: 'amber' },
+  Paid: { label: 'Paid', hint: 'Verified by the kitchen', tone: 'green' },
+  Failed: { label: 'Failed', hint: 'Payment did not go through', tone: 'red' }
+};
+
+export function paymentStatusMeta(status) {
+  return PAYMENT_STATUS_META[status] || { label: status || 'Pending', hint: '', tone: 'neutral' };
+}
+
+// Friendly label for both canonical ('UPI'/'COD') and legacy stored
+// labels ('UPI Instant (9948099296@fam)', 'Cash on Delivery (COD)').
+export function paymentMethodLabel(method, upiId = '') {
+  const m = String(method || '').trim();
+  if (/^upi/i.test(m)) return upiId ? `UPI (${upiId})` : 'UPI';
+  if (/^cod/i.test(m) || /^cash on delivery/i.test(m)) return 'Cash on Delivery';
+  return m || '—';
+}
+
 // Delivery fee. `distanceKm` MUST come from a verified source; when it is
 // missing in distance mode we refuse to guess and report DISTANCE_UNVERIFIED.
 export function computeDelivery({ subtotal = 0, distanceKm = null, settings = DEFAULT_PRICING_SETTINGS } = {}) {
