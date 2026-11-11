@@ -45,10 +45,10 @@ export function buildInvoiceHtml(order, info = {}) {
   const payMeta = paymentStatusMeta(order.paymentStatus);
   const payStatusLine =
     order.paymentStatus === 'Paid'
-      ? '<strong style="color:#047857">Paid — verified by the restaurant</strong>'
+      ? '<strong style="color:#047857">Paid</strong>'
       : order.paymentStatus === 'Failed'
         ? '<strong style="color:#b91c1c">Failed</strong>'
-        : '<strong style="color:#b45309">Pending — payment not yet verified</strong>';
+        : '<strong style="color:#b45309">Pending</strong>';
 
   const gstRows =
     order.gstAmount > 0
@@ -207,7 +207,7 @@ function PayBadge({ order }) {
   };
   return (
     <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border ${tones[meta.tone]}`}>
-      {meta.label}{order.paymentStatus !== 'Paid' ? ' · not verified' : ' · verified'}
+      {meta.label}
     </span>
   );
 }
@@ -338,16 +338,15 @@ export function InvoiceModal({ order, info = {}, onClose, onDownload }) {
           <span className="font-bold text-stone-800">Payment:</span>{' '}
           {paymentMethodLabel(order.paymentMethod, info.upiId)} ·{' '}
           {order.paymentStatus === 'Paid'
-            ? <span className="font-bold text-emerald-700">Paid — verified by the restaurant</span>
+            ? <span className="font-bold text-emerald-700">Paid</span>
             : order.paymentStatus === 'Failed'
               ? <span className="font-bold text-rose-700">Failed</span>
-              : <span className="font-bold text-amber-700">Pending — not yet verified</span>}
+              : <span className="font-bold text-amber-700">Pending</span>}
           {showQr && (
             <span className="block mt-2 text-center">
               <img src={qrSrc} alt="UPI QR code" className="w-28 h-28 mx-auto border rounded-lg p-1 bg-white" />
               <span className="block text-[10px] text-stone-500 mt-1">
                 Scan to pay {money(order.grandTotal)} to <span className="font-bold text-stone-700">{info.upiId}</span>.
-                Payment is confirmed by the restaurant after verification.
               </span>
             </span>
           )}
