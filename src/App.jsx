@@ -317,7 +317,7 @@ function App() {
     () => computeOrderTotals({ subtotal, discount: discountAmount, distanceKm: null, settings: pricingSettings }),
     [subtotal, discountAmount, pricingSettings]
   );
-  const { deliveryFee, gstAmount, grandTotal } = totals;
+  const { deliveryFee, gst: gstAmount, total: grandTotal } = totals;
   const totalCartCount = useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
   // Resolve the selected method against the owner-configured list (falls
